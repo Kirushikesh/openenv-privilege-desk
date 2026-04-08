@@ -141,9 +141,12 @@ def step_episode(body: StepRequest) -> Dict[str, Any]:
     obs, reward, terminated, truncated, info = _world.step(body.action)
     done = terminated or truncated
 
+    # Clamp step reward strictly to (0.01, 0.99) — Phase 2 requirement
+    clamped_reward = min(max(round(reward, 4), 0.01), 0.99)
+
     return {
         "observation": obs,
-        "reward": reward,
+        "reward": clamped_reward,
         "done": done,
         "info": info,
     }
