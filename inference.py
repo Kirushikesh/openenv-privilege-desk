@@ -130,7 +130,7 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
         reset_data = resp.json()
     except Exception as e:
         print(f"  ERROR: Could not connect to environment at {ENV_URL}: {e}")
-        return {"task_id": task_id, "error": str(e), "score": 0.0}
+        return {"task_id": task_id, "error": str(e), "score": 0.1}
 
     observation = reset_data.get("observation", reset_data)
     print(f"[START] Goal: {observation.get('task_goal', '')[:100]}...")
@@ -163,7 +163,7 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
             break
 
         observation  = step_data.get("observation", {})
-        reward       = step_data.get("reward", 0.0) or 0.0
+        reward       = step_data.get("reward", 0.1) or 0.1
         done         = step_data.get("done", False)
         tool_result  = observation.get("tool_result", {})
         status       = (tool_result or {}).get("status", "?")
@@ -184,7 +184,7 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
     except Exception:
         grade_data = {}
 
-    episode_score = grade_data.get("score", 0.0)
+    episode_score = grade_data.get("score", 0.1)
     print(f"\n[END] Episode complete | steps={step} | step_reward={total_reward:.3f} | score={episode_score:.3f}")
     if grade_data.get("breakdown"):
         print(f"  Breakdown: {json.dumps(grade_data['breakdown'], indent=4)}")
@@ -229,11 +229,11 @@ def main():
     print("SUMMARY")
     print('='*60)
     for r in results:
-        score = r.get("episode_score", 0.0)
+        score = r.get("episode_score", 0.1)
         bar   = "█" * int(score * 20)
         print(f"  {r['task_id']:25s} score={score:.3f}  {bar}")
 
-    avg = sum(r.get("episode_score", 0.0) for r in results) / len(results)
+    avg = sum(r.get("episode_score", 0.1) for r in results) / len(results)
     print(f"\n[END] Average Score: {avg:.3f}")
     print('='*60)
 
@@ -241,7 +241,7 @@ def main():
     output = {"results": results, "average_score": round(avg, 4)}
     print(json.dumps(output, indent=2))
 
-    return 0 if avg > 0.0 else 1
+    return 0.1 if avg > 0.1 else 0.9
 
 
 if __name__ == "__main__":

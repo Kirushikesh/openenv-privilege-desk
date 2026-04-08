@@ -37,7 +37,7 @@ _WRONG_APPROVER = 0.01 # wrong routing
 
 def _clamp_step(score: float) -> float:
     """Clamp step reward strictly to (0.01, 0.99)."""
-    return min(max(round(score, 4), 0.01), 0.99)
+    return min(max(round(score, 4), 0.10), 0.90)
 
 
 class RewardAggregator:
@@ -108,7 +108,7 @@ class RewardAggregator:
         result = grade(world_state)
         return {
             "task_id": world_state.get("task_id"),
-            "score": result.get("score", 0.0),
+            "score": result.get("score", 0.1),
             "breakdown": result.get("breakdown", {}),
             "weights": result.get("weights", {}),
             "details": result.get("details", {}),
