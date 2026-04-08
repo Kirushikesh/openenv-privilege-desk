@@ -167,9 +167,12 @@ def grade_episode(body: Dict[str, Any] = None) -> Dict[str, Any]:
         )
 
     score = grade(_world._raw)
+    # Ensure score is strictly in (0, 1) — never exactly 0.0 or 1.0
+    raw_score = score.get("score", 0.01)
+    final_score = max(0.01, min(0.99, raw_score))
     return {
         "task_id": _world._raw.get("task_id", "unknown"),
-        "score": score.get("score", 0.0),
+        "score": round(final_score, 4),
         "breakdown": score.get("breakdown", {}),
         "weights": score.get("weights", {}),
         "details": score.get("details", {}),
@@ -250,11 +253,14 @@ def run_baseline() -> Dict[str, Any]:
                 steps = 1
 
         score_info = grade(ws._raw)
+        # Ensure score is strictly in (0, 1) — never exactly 0.0 or 1.0
+        raw_score = score_info.get("score", 0.01)
+        episode_score = max(0.01, min(0.99, raw_score))
         results.append({
             "task_id": task_id,
             "steps": steps,
             "total_step_reward": round(total_reward, 4),
-            "episode_score": score_info.get("score", 0.0),
+            "episode_score": round(episode_score, 4),
         })
 
     avg_score = sum(r["episode_score"] for r in results) / len(results) if results else 0.0
