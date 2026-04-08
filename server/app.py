@@ -23,7 +23,7 @@ We remove those stateless routes and replace them with our own singleton-
 backed versions so that curl-style HTTP testing works correctly. WebSocket
 (/ws) is untouched and still creates proper per-session environments.
 """
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -187,14 +187,17 @@ def grade_episode(body: Dict[str, Any] = None) -> Dict[str, Any]:
 # ── /tasks ────────────────────────────────────────────────────────────────────
 
 @app.get("/tasks")
-def list_tasks() -> Dict[str, Any]:
+def list_tasks() -> List[Dict[str, Any]]:
     """List all available tasks with their schemas."""
     tasks = []
     for task_id, template in TASK_TEMPLATES.items():
         tasks.append({
-            "task_id": task_id,
+            "id": task_id,
+            "name": task_id.replace("_", " ").title(),
+            "description": template["task_goal"],
             "difficulty": template["difficulty"],
-            "task_goal": template["task_goal"],
+            "grader": f"graders.{task_id}_grader",
+            "time_limit_seconds": 600,
             "max_steps": template["max_steps"],
             "available_tools": template["available_tools"],
             "grading_weights": template["grading_weights"],
@@ -214,7 +217,7 @@ def list_tasks() -> Dict[str, Any]:
                 "required": ["tool_name"],
             },
         })
-    return {"tasks": tasks, "count": len(tasks)}
+    return tasks
 
 
 # ── /baseline ─────────────────────────────────────────────────────────────────

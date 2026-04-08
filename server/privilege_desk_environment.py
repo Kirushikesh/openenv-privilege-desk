@@ -41,7 +41,7 @@ class PrivilegeDeskEnvironment(Environment[PrivilegeDeskAction, PrivilegeDeskObs
         super().__init__()
         self._world = WorldState()
         self._state = State(episode_id=str(uuid4()), step_count=0)
-        self._last_episode_score: Optional[dict] = None
+        self._last_episode_score: Optional[float] = None
 
     # ── OpenEnv API ───────────────────────────────────────────────────────────
 
@@ -118,12 +118,13 @@ class PrivilegeDeskEnvironment(Environment[PrivilegeDeskAction, PrivilegeDeskObs
     def state(self) -> State:
         return self._state
 
-    def get_episode_score(self) -> Optional[dict]:
-        """Return the last episode's graded score (called by /grader endpoint)."""
-        if self._last_episode_score:
+    def get_episode_score(self) -> Optional[float]:
+        """Return the last episode's graded score."""
+        if self._last_episode_score is not None:
             return self._last_episode_score
         # If episode is still running, compute current score
-        return self._world.compute_episode_score()
+        score_dict = self._world.compute_episode_score()
+        return float(score_dict.get("score", 0.10))
 
     def get_metadata(self):
         from openenv.core.env_server.interfaces import EnvironmentMetadata
