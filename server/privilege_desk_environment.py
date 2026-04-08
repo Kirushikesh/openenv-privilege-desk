@@ -3,7 +3,7 @@ PrivilegeDesk Environment — OpenEnv-compatible wrapper.
 
 Exposes the WorldState over the standard OpenEnv Environment interface.
 """
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -31,6 +31,11 @@ class PrivilegeDeskEnvironment(Environment[PrivilegeDeskAction, PrivilegeDeskObs
     """
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
+
+    # Class-level reference to the most recently active WorldState.
+    # Updated on every reset() and step() so /grader can read the real
+    # live state without framework hacks.
+    _active_world: ClassVar[Optional["WorldState"]] = None
 
     def __init__(self):
         super().__init__()
@@ -67,6 +72,9 @@ class PrivilegeDeskEnvironment(Environment[PrivilegeDeskAction, PrivilegeDeskObs
         )
         self._last_episode_score = None
 
+        # Update class-level reference so /grader can always find this world
+        PrivilegeDeskEnvironment._active_world = self._world
+
         return self._build_observation(obs_dict, reward=0.0, done=False, tool_result=None)
 
     def step(
@@ -83,6 +91,9 @@ class PrivilegeDeskEnvironment(Environment[PrivilegeDeskAction, PrivilegeDeskObs
 
         obs_dict, step_reward, terminated, truncated, info = self._world.step(action_dict)
         self._state.step_count = self._world.step_count
+
+        # Keep class reference current so /grader always sees the latest state
+        PrivilegeDeskEnvironment._active_world = self._world
 
         done = terminated or truncated
         if done:

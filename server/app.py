@@ -12,11 +12,22 @@ Additional endpoints (hackathon required):
     GET  /tasks     — list the 3 tasks with action schemas
     POST /grader    — return episode score breakdown (0.0–1.0)
     POST /baseline  — run baseline agent and return scores
+
+NOTE on HTTP statefulness
+--------------------------
+OpenEnv's create_app() HTTP /reset and /step handlers are intentionally
+stateless — each request creates a new throwaway env instance. State is
+only preserved over WebSocket.
+
+We remove those stateless routes and replace them with our own singleton-
+backed versions so that curl-style HTTP testing works correctly. WebSocket
+(/ws) is untouched and still creates proper per-session environments.
 """
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from starlette.routing import Route
 
 try:
     from openenv.core.env_server.http_server import create_app
@@ -30,20 +41,141 @@ except (ImportError, ModuleNotFoundError):
     from models import PrivilegeDeskAction, PrivilegeDeskObservation
     from server.privilege_desk_environment import PrivilegeDeskEnvironment
 
+from env.world_state import WorldState
+from reward.grader import grade
 from pipeline.task_templates import TASK_TEMPLATES
 
-# ── Base app from OpenEnv ─────────────────────────────────────────────────────
+
+# ── Module-level singleton — shared across /reset, /step, /grader ─────────────
+# Mimics what OpenEnv's WebSocket session manager does per-connection, but
+# over plain HTTP for easy curl / script testing.
+
+_world: WorldState = WorldState()
+
+
+# ── Build base app from OpenEnv (registers /ws, /schema, /health, /state) ────
 
 app = create_app(
     PrivilegeDeskEnvironment,
     PrivilegeDeskAction,
     PrivilegeDeskObservation,
     env_name="privilege_desk",
-    max_concurrent_envs=4,
+    max_concurrent_envs=1,
 )
 
-# Shared env instance for HTTP endpoints (not WebSocket — those are isolated)
-_http_env = PrivilegeDeskEnvironment()
+# Remove the stateless /reset and /step routes that create_app registered.
+# FastAPI uses first-match routing, so if we don't remove them our overrides
+# (registered below) would never be reached.
+_OVERRIDE_PATHS = {"/reset", "/step"}
+app.routes[:] = [
+    r for r in app.routes
+    if not (
+        isinstance(r, Route)
+        and r.path in _OVERRIDE_PATHS
+        and "POST" in (r.methods or set())
+    )
+]
+
+
+# ── Pydantic request models ───────────────────────────────────────────────────
+
+class ResetRequest(BaseModel):
+    task_id: str = "access_decision"
+    seed: Optional[int] = None
+    difficulty_level: int = 1
+
+
+class StepRequest(BaseModel):
+    action: Dict[str, Any]  # {"tool_name": "...", "arguments": {...}}
+
+
+# ── /reset ────────────────────────────────────────────────────────────────────
+
+@app.post("/reset")
+def reset_episode(body: ResetRequest = None) -> Dict[str, Any]:
+    """Reset to a new episode and return the initial observation.
+
+    The world state is stored in a module-level singleton so that subsequent
+    /step and /grader calls operate on the same episode.
+    """
+    global _world
+    req = body or ResetRequest()
+
+    _world = WorldState()
+    obs = _world.reset(
+        seed=req.seed,
+        task_id=req.task_id,
+        difficulty_level=req.difficulty_level,
+    )
+
+    return {
+        "observation": obs,
+        "reward": 0.0,
+        "done": False,
+        "info": {
+            "task_id": req.task_id,
+            "seed": req.seed,
+            "episode": "started",
+        },
+    }
+
+
+# ── /step ─────────────────────────────────────────────────────────────────────
+
+@app.post("/step")
+def step_episode(body: StepRequest) -> Dict[str, Any]:
+    """Execute one tool call on the current episode.
+
+    body.action must be a dict with:
+        tool_name (str)   — e.g. "request.view", "access.decide"
+        arguments (dict)  — tool-specific kwargs (can be empty {})
+    """
+    global _world
+
+    if _world._router is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No active episode. Call POST /reset first.",
+        )
+
+    obs, reward, terminated, truncated, info = _world.step(body.action)
+    done = terminated or truncated
+
+    return {
+        "observation": obs,
+        "reward": reward,
+        "done": done,
+        "info": info,
+    }
+
+
+# ── /grader ───────────────────────────────────────────────────────────────────
+
+@app.post("/grader")
+def grade_episode(body: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Return the grading breakdown for the current live episode.
+
+    Reads the world state already mutated by /reset + /step calls and
+    scores it — no re-execution, no fake episode.
+    """
+    global _world
+
+    if _world._router is None or not _world._raw:
+        raise HTTPException(
+            status_code=409,
+            detail="No active episode. Call POST /reset first, then POST /step.",
+        )
+
+    score = grade(_world._raw)
+    return {
+        "task_id": _world._raw.get("task_id", "unknown"),
+        "score": score.get("score", 0.0),
+        "breakdown": score.get("breakdown", {}),
+        "weights": score.get("weights", {}),
+        "details": score.get("details", {}),
+        "steps_taken": _world.step_count,
+        "episode_done": _world.done,
+    }
 
 
 # ── /tasks ────────────────────────────────────────────────────────────────────
@@ -79,71 +211,59 @@ def list_tasks() -> Dict[str, Any]:
     return {"tasks": tasks, "count": len(tasks)}
 
 
-# ── /grader ───────────────────────────────────────────────────────────────────
-
-@app.post("/grader")
-def grade_episode(body: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Return the episode score breakdown for the most recent completed episode.
-
-    Optionally accepts { "task_id": "..." } to filter, but returns the
-    last episode score by default.
-    """
-    score = _http_env.get_episode_score()
-    if not score:
-        raise HTTPException(
-            status_code=409,
-            detail="No completed episode found. Run /reset then /step until done=True.",
-        )
-    return {
-        "task_id": score.get("task_id"),
-        "score": score.get("score", 0.0),
-        "breakdown": score.get("breakdown", {}),
-        "weights": score.get("weights", {}),
-        "details": score.get("details", {}),
-    }
-
-
 # ── /baseline ─────────────────────────────────────────────────────────────────
 
 @app.post("/baseline")
 def run_baseline() -> Dict[str, Any]:
-    """Run a simple baseline agent on all 3 tasks and return average scores."""
+    """Run a naive baseline agent on all 3 tasks and return scores."""
     results = []
 
     for task_id in TASK_TEMPLATES:
-        env = PrivilegeDeskEnvironment()
-        obs = env.reset(seed=42, task_id=task_id)
+        ws = WorldState()
+        ws.reset(seed=42, task_id=task_id)
         total_reward = 0.0
-        done = False
         steps = 0
 
-        # Naive baseline: just call the first available tool repeatedly until done
-        available = obs.available_tools
-        first_tool = available[0] if available else "policy.list"
+        if task_id == "access_decision":
+            _, r, _, _, _ = ws.step({
+                "tool_name": "access.decide",
+                "arguments": {"decision": "approve", "role": "viewer",
+                              "ttl_hours": 4, "justification_category": "operational"},
+            })
+            total_reward += r
+            steps = 1
+        elif task_id == "access_review":
+            _, r, _, _, _ = ws.step({
+                "tool_name": "review.submit",
+                "arguments": {"summary": "baseline review"},
+            })
+            total_reward += r
+            steps = 1
+        elif task_id == "jit_escalation":
+            req_id = next(iter(ws._raw.get("pending_requests", {})), None)
+            if req_id:
+                _, r, _, _, _ = ws.step({
+                    "tool_name": "access.grant",
+                    "arguments": {"request_id": req_id},
+                })
+                total_reward += r
+                steps = 1
 
-        while not done and steps < 5:
-            action = PrivilegeDeskAction(tool_name=first_tool, arguments={})
-            obs = env.step(action)
-            total_reward += (obs.reward or 0.0)
-            done = obs.done
-            steps += 1
-
-        # Get final score
-        score_info = env.get_episode_score()
+        score_info = grade(ws._raw)
         results.append({
             "task_id": task_id,
             "steps": steps,
             "total_step_reward": round(total_reward, 4),
-            "episode_score": score_info.get("score", 0.0) if score_info else 0.0,
+            "episode_score": score_info.get("score", 0.0),
         })
 
     avg_score = sum(r["episode_score"] for r in results) / len(results) if results else 0.0
 
     return {
-        "baseline_agent": "naive_first_tool",
+        "baseline_agent": "naive_terminal_tool",
         "results": results,
         "average_episode_score": round(avg_score, 4),
-        "note": "This is a naive baseline. A well-prompted LLM agent should score significantly higher.",
+        "note": "Naive baseline — hits the terminal tool immediately with default args.",
     }
 
 
