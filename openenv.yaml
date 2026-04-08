@@ -1,0 +1,13 @@
+spec_version: 1
+name: privilege_desk
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+tasks:
+  - id: access_decision
+    difficulty: easy
+  - id: jit_escalation
+    difficulty: medium
+  - id: access_review
+    difficulty: hard

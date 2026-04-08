@@ -1,0 +1,47 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-privilege_desk"
+version = "1.0.0"
+description = "PrivilegeDesk: Zero-Standing-Privilege Ops environment for training AI agents on enterprise IAM tasks"
+requires-python = ">=3.10"
+dependencies = [
+    # Core OpenEnv runtime
+    "openenv-core[core]>=0.2.2",
+    # Standard library only — no extra ML dependencies needed
+    "pydantic>=2.5.0,<3.0.0",
+    "openai>=1.0.0", # for baseline inference script
+    "requests>=2.33.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+# Server entry point - enables running via: uv run --project . server
+# or: python -m privilege_desk.server.app
+server = "privilege_desk.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = [
+    "privilege_desk", "privilege_desk.server",
+    "pipeline", "env", "reward",
+]
+[tool.setuptools.package-dir]
+"privilege_desk" = "."
+"privilege_desk.server" = "server"
+"pipeline" = "pipeline"
+"env" = "env"
+"reward" = "reward"
