@@ -241,7 +241,7 @@ def main():
     output = {"results": results, "average_score": round(avg, 4)}
     print(json.dumps(output, indent=2))
 
-    return 0.1 if avg > 0.1 else 0.9
+    return 0 if avg > 0.0 else 1
 
 
 if __name__ == "__main__":
