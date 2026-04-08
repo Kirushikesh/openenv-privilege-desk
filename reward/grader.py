@@ -16,7 +16,7 @@ _MAX = 0.99
 
 def _clamp(score: float) -> float:
     """Ensure score is strictly in (0, 1) — never exactly 0.0 or 1.0."""
-    return round(max(_MIN, min(_MAX, score)), 4)
+    return min(max(round(score, 4), 0.01), 0.99)
 
 
 # ── Task 1: Access Decision ───────────────────────────────────────────────────
