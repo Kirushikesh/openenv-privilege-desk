@@ -130,7 +130,7 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
         reset_data = resp.json()
     except Exception as e:
         print(f"  ERROR: Could not connect to environment at {ENV_URL}: {e}")
-        return {"task_id": task_id, "error": str(e), "score": 0.1}
+        return {"task_id": task_id, "error": str(e), "score": 0.10}
 
     observation = reset_data.get("observation", reset_data)
     print(f"[START] Goal: {observation.get('task_goal', '')[:100]}...")
@@ -184,17 +184,16 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
     except Exception:
         grade_data = {}
 
-    episode_score = grade_data.get("score", 0.1)
+    episode_score = grade_data.get("score", 0.10)
+    # Clamp strictly to (0, 1) — never exactly 0.0 or 1.0
+    episode_score = min(max(round(episode_score, 4), 0.10), 0.90)
     print(f"\n[END] Episode complete | steps={step} | step_reward={total_reward:.3f} | score={episode_score:.3f}")
-    if grade_data.get("breakdown"):
-        print(f"  Breakdown: {json.dumps(grade_data['breakdown'], indent=4)}")
 
     return {
-        "task_id":       task_id,
-        "steps":         step,
-        "total_reward":  round(total_reward, 4),
-        "episode_score": episode_score,
-        "breakdown":     grade_data.get("breakdown", {}),
+        "task_id":      task_id,
+        "steps":        step,
+        "total_reward": round(total_reward, 4),
+        "score":        episode_score,   # key must be 'score' for the judge
     }
 
 
@@ -229,11 +228,11 @@ def main():
     print("SUMMARY")
     print('='*60)
     for r in results:
-        score = r.get("episode_score", 0.1)
+        score = r.get("score", 0.10)
         bar   = "█" * int(score * 20)
         print(f"  {r['task_id']:25s} score={score:.3f}  {bar}")
 
-    avg = sum(r.get("episode_score", 0.1) for r in results) / len(results)
+    avg = sum(r.get("score", 0.10) for r in results) / len(results)
     print(f"\n[END] Average Score: {avg:.3f}")
     print('='*60)
 

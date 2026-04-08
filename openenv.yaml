@@ -7,7 +7,10 @@ port: 8000
 tasks:
   - id: access_decision
     difficulty: easy
+    grader: graders.access_decision_grader
   - id: jit_escalation
     difficulty: medium
+    grader: graders.jit_escalation_grader
   - id: access_review
     difficulty: hard
+    grader: graders.access_review_grader
