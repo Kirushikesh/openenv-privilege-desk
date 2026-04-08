@@ -1,3 +1,13 @@
+---
+title: Privilege Desk
+emoji: 🏢
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+app_port: 8000
+---
+
 # PrivilegeDesk
 
 **Zero-Standing-Privilege Ops Environment for Training AI Agents**
