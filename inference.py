@@ -23,7 +23,7 @@ from openai import OpenAI
 # ── Config ────────────────────────────────────────────────────────────────────
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "hf_placeholder"
+HF_TOKEN     = os.getenv("HF_TOKEN")
 MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:8000")
 
@@ -116,7 +116,7 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
     import requests
 
     print(f"\n{'='*60}")
-    print(f"Task: {task_id}")
+    print(f"[START] Task: {task_id}")
     print('='*60)
 
     # Reset
@@ -133,7 +133,7 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
         return {"task_id": task_id, "error": str(e), "score": 0.0}
 
     observation = reset_data.get("observation", reset_data)
-    print(f"  Goal: {observation.get('task_goal', '')[:100]}...")
+    print(f"[START] Goal: {observation.get('task_goal', '')[:100]}...")
 
     history: List[str] = []
     total_reward = 0.0
@@ -147,7 +147,7 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
         action = call_llm(client, observation, history)
         tool = action.get("tool_name")
         args = action.get("arguments", {})
-        print(f"  Step {step:2d}: {tool}({json.dumps(args)[:60]})")
+        print(f"[STEP] Step {step:2d}: {tool}({json.dumps(args)[:60]})")
 
         # Execute step
         try:
@@ -173,7 +173,7 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
         obs_preview   = obs_lines[0][:80] if obs_lines else ""
         history.append(f"Step {step}: {tool} → {status}: {obs_preview}")
 
-        print(f"          → status={status}, step_reward={reward:+.3f}, done={done}")
+        print(f"[STEP] status={status}, step_reward={reward:+.3f}, done={done}")
         if obs_preview:
             print(f"             {obs_preview}")
 
@@ -185,7 +185,7 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
         grade_data = {}
 
     episode_score = grade_data.get("score", 0.0)
-    print(f"\n  ✓ Episode complete | steps={step} | step_reward={total_reward:.3f} | score={episode_score:.3f}")
+    print(f"\n[END] Episode complete | steps={step} | step_reward={total_reward:.3f} | score={episode_score:.3f}")
     if grade_data.get("breakdown"):
         print(f"  Breakdown: {json.dumps(grade_data['breakdown'], indent=4)}")
 
@@ -201,16 +201,16 @@ def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    global ENV_URL
     parser = argparse.ArgumentParser(description="PrivilegeDesk baseline inference")
     parser.add_argument("--task",  choices=TASK_IDS, help="Run a specific task only")
     parser.add_argument("--all",   action="store_true", help="Run all 3 tasks (default)")
     parser.add_argument("--url",   default=ENV_URL, help="Environment base URL")
     args = parser.parse_args()
 
-    global ENV_URL
     ENV_URL = args.url
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
     tasks = [args.task] if args.task else TASK_IDS
 
@@ -234,7 +234,7 @@ def main():
         print(f"  {r['task_id']:25s} score={score:.3f}  {bar}")
 
     avg = sum(r.get("episode_score", 0.0) for r in results) / len(results)
-    print(f"\n  Average Score: {avg:.3f}")
+    print(f"\n[END] Average Score: {avg:.3f}")
     print('='*60)
 
     # Output JSON for automated evaluation
