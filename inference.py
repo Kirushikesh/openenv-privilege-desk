@@ -209,6 +209,17 @@ def main():
 
     ENV_URL = args.url
 
+    # Check for TASK_NAME environment variable (judge may set this)
+    target_task = os.getenv("TASK_NAME")
+    if target_task:
+        # Map task names to task_ids
+        if "access_decision" in target_task or "easy" in target_task:
+            args.task = "access_decision"
+        elif "jit_escalation" in target_task or "medium" in target_task:
+            args.task = "jit_escalation"
+        elif "access_review" in target_task or "hard" in target_task:
+            args.task = "access_review"
+
     client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
     tasks = [args.task] if args.task else TASK_IDS

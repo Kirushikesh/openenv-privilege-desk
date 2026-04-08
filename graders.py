@@ -45,18 +45,27 @@ def _float_score(grade_fn, world_state: dict) -> float:
         return 0.10  # safe floor on any error
 
 
-def access_decision_grader(world_state: dict = None) -> float:
+def access_decision_grader(trajectory: dict = None) -> float:
     """Grader for task: access_decision. Returns float in (0.01, 0.99)."""
+    trajectory = trajectory or {}
+    # Extract world_state if it exists in trajectory, otherwise use trajectory itself
+    world_state = trajectory.get("world_state", trajectory)
     return _float_score(_grade_access, world_state)
 
 
-def jit_escalation_grader(world_state: dict = None) -> float:
+def jit_escalation_grader(trajectory: dict = None) -> float:
     """Grader for task: jit_escalation. Returns float in (0.01, 0.99)."""
+    trajectory = trajectory or {}
+    # Extract world_state if it exists in trajectory, otherwise use trajectory itself
+    world_state = trajectory.get("world_state", trajectory)
     return _float_score(_grade_jit, world_state)
 
 
-def access_review_grader(world_state: dict = None) -> float:
+def access_review_grader(trajectory: dict = None) -> float:
     """Grader for task: access_review. Returns float in (0.01, 0.99)."""
+    trajectory = trajectory or {}
+    # Extract world_state if it exists in trajectory, otherwise use trajectory itself
+    world_state = trajectory.get("world_state", trajectory)
     return _float_score(_grade_review, world_state)
 
 
