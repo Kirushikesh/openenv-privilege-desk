@@ -1,22 +1,24 @@
 """
-inference.py — Baseline agent for PrivilegeDesk.
+inference.py — PrivilegeDesk OpenEnv Agent
 
-Mandatory fields (set via environment variables):
+Runs an LLM agent through all 3 privilege management tasks and emits structured stdout logs.
+
+Required environment variables:
     API_BASE_URL   LLM API endpoint (OpenAI-compatible)
     MODEL_NAME     Model identifier
     HF_TOKEN       HuggingFace / API key
 
-Usage:
-    python inference.py
-    python inference.py --task access_decision
-    python inference.py --all  # runs all 3 tasks
+Stdout format (must not deviate):
+    [START] task=<task> env=<benchmark> model=<model>
+    [STEP]  step=<n> action=<action> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...>
 """
 import argparse
 import json
 import os
 import sys
 import textwrap
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
@@ -27,6 +29,7 @@ HF_TOKEN     = os.getenv("HF_TOKEN")
 MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:8000")
 
+BENCHMARK    = "privilege_desk"
 MAX_STEPS    = 20
 TEMPERATURE  = 0.0
 
@@ -57,6 +60,32 @@ Rules:
 
 Available context is in the observation JSON you receive.
 """).strip()
+
+
+# ── Logging helpers (judge-parsed format) ────────────────────────────────────
+
+def log_start(task: str, env: str, model: str) -> None:
+    """[START] line — emitted exactly once at episode begin."""
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str] = None) -> None:
+    """[STEP] line — emitted immediately after each env.step() returns."""
+    error_val = error if error else "null"
+    done_val  = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    """[END] line — always emitted (even on exception) via finally block."""
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
 # ── LLM call ─────────────────────────────────────────────────────────────────
@@ -105,108 +134,116 @@ def call_llm(client: OpenAI, observation: Dict[str, Any], history: List[str]) ->
             raise ValueError("No tool_name in response")
         return action
     except Exception as exc:
-        print(f"  [LLM error] {exc} — falling back to policy.list")
+        print(f"[DEBUG] LLM error: {exc}", file=sys.stderr, flush=True)
         return {"tool_name": "policy.list", "arguments": {}}
 
 
 # ── Episode runner ────────────────────────────────────────────────────────────
 
-def run_episode(client: OpenAI, task_id: str) -> Dict[str, Any]:
-    """Run one full episode for a task against the local environment."""
+def run_episode(client: OpenAI, task_id: str) -> None:
+    """Run one full episode for a task, emitting [START]/[STEP]/[END] logs."""
     import requests
 
-    print(f"\n{'='*60}")
-    print(f"[START] Task: {task_id}")
-    print('='*60)
-
-    # Reset
-    try:
-        resp = requests.post(
-            f"{ENV_URL}/reset",
-            json={"task_id": task_id, "seed": 42},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        reset_data = resp.json()
-    except Exception as e:
-        print(f"  ERROR: Could not connect to environment at {ENV_URL}: {e}")
-        return {"task_id": task_id, "error": str(e), "score": 0.10}
-
-    observation = reset_data.get("observation", reset_data)
-    print(f"[START] Goal: {observation.get('task_goal', '')[:100]}...")
-
     history: List[str] = []
-    total_reward = 0.0
-    done = False
-    step = 0
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+    last_error: Optional[str] = None
 
-    while not done and step < MAX_STEPS:
-        step += 1
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-        # Get action from LLM
-        action = call_llm(client, observation, history)
-        tool = action.get("tool_name")
-        args = action.get("arguments", {})
-        print(f"[STEP] Step {step:2d}: {tool}({json.dumps(args)[:60]})")
-
-        # Execute step
+    try:
+        # Reset
         try:
-            step_resp = requests.post(
-                f"{ENV_URL}/step",
-                json={"action": action},
+            resp = requests.post(
+                f"{ENV_URL}/reset",
+                json={"task_id": task_id, "seed": 42},
                 timeout=30,
             )
-            step_resp.raise_for_status()
-            step_data  = step_resp.json()
+            resp.raise_for_status()
+            reset_data = resp.json()
         except Exception as e:
-            print(f"    ERROR in /step: {e}")
-            break
+            last_error = str(e)
+            log_end(success=False, steps=0, score=0.0, rewards=[])
+            return
 
-        observation  = step_data.get("observation", {})
-        reward       = step_data.get("reward", 0.1) or 0.1
-        done         = step_data.get("done", False)
-        tool_result  = observation.get("tool_result", {})
-        status       = (tool_result or {}).get("status", "?")
-        obs_lines    = (tool_result or {}).get("observations", [])
+        observation = reset_data.get("observation", reset_data)
+        done = False
 
-        total_reward += reward
-        obs_preview   = obs_lines[0][:80] if obs_lines else ""
-        history.append(f"Step {step}: {tool} → {status}: {obs_preview}")
+        # Episode loop
+        while not done and steps_taken < MAX_STEPS:
+            steps_taken += 1
 
-        print(f"[STEP] status={status}, step_reward={reward:+.3f}, done={done}")
-        if obs_preview:
-            print(f"             {obs_preview}")
+            # Get action from LLM
+            action = call_llm(client, observation, history)
+            tool = action.get("tool_name", "unknown")
+            args = action.get("arguments", {})
+            action_str = f"{tool}({json.dumps(args)[:40]})"
 
-    # Get final grade
-    try:
-        grade_resp = requests.post(f"{ENV_URL}/grader", json={}, timeout=10)
-        grade_data = grade_resp.json() if grade_resp.ok else {}
-    except Exception:
-        grade_data = {}
+            # Execute step
+            try:
+                step_resp = requests.post(
+                    f"{ENV_URL}/step",
+                    json={"action": action},
+                    timeout=30,
+                )
+                step_resp.raise_for_status()
+                step_data = step_resp.json()
+                last_error = None
+            except Exception as e:
+                last_error = str(e)
+                reward = 0.0
+                done = True
+                rewards.append(reward)
+                log_step(step=steps_taken, action=action_str, reward=reward, done=done, error=last_error)
+                break
 
-    episode_score = grade_data.get("score", 0.10)
-    # Clamp strictly to (0, 1) — never exactly 0.0 or 1.0
-    episode_score = min(max(round(episode_score, 4), 0.10), 0.90)
-    print(f"\n[END] Episode complete | steps={step} | step_reward={total_reward:.3f} | score={episode_score:.3f}")
+            observation = step_data.get("observation", {})
+            reward = step_data.get("reward", 0.0) or 0.0
+            done = step_data.get("done", False)
+            tool_result = observation.get("tool_result", {})
+            status = (tool_result or {}).get("status", "?")
+            obs_lines = (tool_result or {}).get("observations", [])
 
-    return {
-        "task_id":      task_id,
-        "steps":        step,
-        "total_reward": round(total_reward, 4),
-        "score":        episode_score,   # key must be 'score' for the judge
-    }
+            rewards.append(reward)
+            obs_preview = obs_lines[0][:60] if obs_lines else ""
+            history.append(f"Step {steps_taken}: {tool} → {status}: {obs_preview}")
+
+            log_step(step=steps_taken, action=action_str, reward=reward, done=done, error=last_error)
+
+        # Get final grade from environment's grader endpoint
+        try:
+            grade_resp = requests.post(f"{ENV_URL}/grader", json={}, timeout=10)
+            grade_data = grade_resp.json() if grade_resp.ok else {}
+            score = grade_data.get("score", 0.0)
+        except Exception:
+            # Fallback: compute mean of step rewards
+            score = sum(rewards) / len(rewards) if rewards else 0.0
+
+        # Clamp score strictly to (0.01, 0.99) as required by judge
+        score = max(0.01, min(score, 0.99))
+        success = score > 0.333  # above random baseline
+
+    except Exception as exc:
+        print(f"[DEBUG] Episode error: {exc}", file=sys.stderr, flush=True)
+        last_error = str(exc)
+
+    finally:
+        # [END] MUST always be emitted
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    global ENV_URL
     parser = argparse.ArgumentParser(description="PrivilegeDesk baseline inference")
-    parser.add_argument("--task",  choices=TASK_IDS, help="Run a specific task only")
-    parser.add_argument("--all",   action="store_true", help="Run all 3 tasks (default)")
-    parser.add_argument("--url",   default=ENV_URL, help="Environment base URL")
+    parser.add_argument("--task", choices=TASK_IDS, help="Run a specific task only")
+    parser.add_argument("--all", action="store_true", help="Run all 3 tasks (default)")
+    parser.add_argument("--url", default=ENV_URL, help="Environment base URL")
     args = parser.parse_args()
 
+    global ENV_URL
     ENV_URL = args.url
 
     # Check for TASK_NAME environment variable (judge may set this)
@@ -220,39 +257,16 @@ def main():
         elif "access_review" in target_task or "hard" in target_task:
             args.task = "access_review"
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    if not HF_TOKEN:
+        print("[ERROR] HF_TOKEN environment variable not set", file=sys.stderr)
+        sys.exit(1)
 
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
     tasks = [args.task] if args.task else TASK_IDS
 
-    print(f"\nPrivilegeDesk Baseline Inference")
-    print(f"  Model:  {MODEL_NAME}")
-    print(f"  Env:    {ENV_URL}")
-    print(f"  Tasks:  {tasks}")
-
-    results = []
     for task_id in tasks:
-        result = run_episode(client, task_id)
-        results.append(result)
-
-    # Summary
-    print(f"\n{'='*60}")
-    print("SUMMARY")
-    print('='*60)
-    for r in results:
-        score = r.get("score", 0.10)
-        bar   = "█" * int(score * 20)
-        print(f"  {r['task_id']:25s} score={score:.3f}  {bar}")
-
-    avg = sum(r.get("score", 0.10) for r in results) / len(results)
-    print(f"\n[END] Average Score: {avg:.3f}")
-    print('='*60)
-
-    # Output JSON for automated evaluation
-    output = {"results": results, "average_score": round(avg, 4)}
-    print(json.dumps(output, indent=2))
-
-    return 0 if avg > 0.0 else 1
+        run_episode(client, task_id)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
