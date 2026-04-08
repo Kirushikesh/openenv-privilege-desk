@@ -237,13 +237,14 @@ def run_episode(client: OpenAI, task_id: str) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    global ENV_URL
+    
     parser = argparse.ArgumentParser(description="PrivilegeDesk baseline inference")
     parser.add_argument("--task", choices=TASK_IDS, help="Run a specific task only")
     parser.add_argument("--all", action="store_true", help="Run all 3 tasks (default)")
     parser.add_argument("--url", default=ENV_URL, help="Environment base URL")
     args = parser.parse_args()
 
-    global ENV_URL
     ENV_URL = args.url
 
     # Check for TASK_NAME environment variable (judge may set this)
