@@ -142,7 +142,7 @@ def step_episode(body: StepRequest) -> Dict[str, Any]:
     done = terminated or truncated
 
     # Clamp step reward strictly to (0.01, 0.99) — Phase 2 requirement
-    clamped_reward = min(max(round(reward, 4), 0.01), 0.99)
+    clamped_reward = min(max(round(reward, 4), 0.10), 0.90)
 
     return {
         "observation": obs,
@@ -171,8 +171,8 @@ def grade_episode(body: Dict[str, Any] = None) -> Dict[str, Any]:
 
     score = grade(_world._raw)
     # Ensure score is strictly in (0, 1) — never exactly 0.0 or 1.0
-    raw_score = score.get("score", 0.01)
-    final_score = max(0.01, min(0.99, raw_score))
+    raw_score = score.get("score", 0.10)
+    final_score = max(0.10, min(0.90, raw_score))
     return {
         "task_id": _world._raw.get("task_id", "unknown"),
         "score": round(final_score, 4),
@@ -257,8 +257,8 @@ def run_baseline() -> Dict[str, Any]:
 
         score_info = grade(ws._raw)
         # Ensure score is strictly in (0, 1) — never exactly 0.0 or 1.0
-        raw_score = score_info.get("score", 0.01)
-        episode_score = max(0.01, min(0.99, raw_score))
+        raw_score = score_info.get("score", 0.10)
+        episode_score = max(0.10, min(0.90, raw_score))
         results.append({
             "task_id": task_id,
             "steps": steps,

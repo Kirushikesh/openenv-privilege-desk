@@ -10,13 +10,13 @@ All graders clamp final output to [0.01, 0.99].
 from typing import Any, Dict
 
 # Score bounds: strictly between 0 and 1 (hackathon Phase 2 requirement)
-_MIN = 0.01
-_MAX = 0.99
+_MIN = 0.10
+_MAX = 0.90
 
 
 def _clamp(score: float) -> float:
     """Ensure score is strictly in (0, 1) — never exactly 0.0 or 1.0."""
-    return min(max(round(score, 4), 0.01), 0.99)
+    return min(max(round(score, 4), 0.10), 0.90)
 
 
 # ── Task 1: Access Decision ───────────────────────────────────────────────────
