@@ -19,6 +19,11 @@ def _clamp(score: float) -> float:
     return min(max(round(score, 4), 0.10), 0.90)
 
 
+def _clamp_breakdown(scores: dict) -> dict:
+    """Clamp every individual sub-score to strictly (0, 1)."""
+    return {k: _clamp(v) for k, v in scores.items()}
+
+
 # ── Task 1: Access Decision ───────────────────────────────────────────────────
 
 def grade_access_decision(world_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -52,8 +57,8 @@ def grade_access_decision(world_state: Dict[str, Any]) -> Dict[str, Any]:
 
     if not decided_req:
         # No decision submitted — partial credit for viewing (policy_compliance baseline)
-        # Score: 0.0 across all — clamp guarantees (0, 1) → 0.01
         details["error"] = "No decision was submitted"
+        scores = _clamp_breakdown(scores)
         total = _clamp(sum(scores[k] * weights[k] for k in weights))
         return {"score": total, "breakdown": scores,
                 "weights": weights, "details": details}
@@ -64,6 +69,7 @@ def grade_access_decision(world_state: Dict[str, Any]) -> Dict[str, Any]:
 
     if not correct:
         details["error"] = "No correct decision found for this request"
+        scores = _clamp_breakdown(scores)
         total = _clamp(sum(scores[k] * weights[k] for k in weights))
         return {"score": total, "breakdown": scores,
                 "weights": weights, "details": details}
@@ -103,6 +109,7 @@ def grade_access_decision(world_state: Dict[str, Any]) -> Dict[str, Any]:
         scores["correct_justification"] = 1.0
     details["justification"] = {"agent": agent_just, "correct": correct_just}
 
+    scores = _clamp_breakdown(scores)
     total = _clamp(sum(scores[k] * weights[k] for k in weights))
     return {"score": total, "breakdown": scores, "weights": weights, "details": details}
 
@@ -136,6 +143,7 @@ def grade_jit_escalation(world_state: Dict[str, Any]) -> Dict[str, Any]:
 
     if not req:
         details["error"] = "No request found"
+        scores = _clamp_breakdown(scores)
         return {"score": _clamp(0.0), "breakdown": scores,
                 "weights": weights, "details": details}
 
@@ -199,6 +207,7 @@ def grade_jit_escalation(world_state: Dict[str, Any]) -> Dict[str, Any]:
     details["final_decision"] = {
         "grant_activated": grant_activated, "should_approve": should_approve}
 
+    scores = _clamp_breakdown(scores)
     total = _clamp(sum(scores[k] * weights[k] for k in weights))
     return {"score": total, "breakdown": scores, "weights": weights, "details": details}
 
@@ -295,6 +304,7 @@ def grade_access_review(world_state: Dict[str, Any]) -> Dict[str, Any]:
         scores["review_submitted"] = 1.0
     details["review_submitted"] = review_submitted
 
+    scores = _clamp_breakdown(scores)
     total = _clamp(sum(scores[k] * weights[k] for k in weights))
     return {"score": total, "breakdown": scores, "weights": weights, "details": details}
 
