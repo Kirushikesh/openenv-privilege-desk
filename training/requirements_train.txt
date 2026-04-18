@@ -1,0 +1,25 @@
+# GRPO + LoRA training dependencies for PrivilegeDesk
+# Install with: pip install -r training/requirements_train.txt
+
+# Core ML stack
+torch>=2.3.0
+transformers>=4.46.0
+tokenizers>=0.20.0
+
+# LoRA adapters
+peft>=0.12.0
+
+# GRPO trainer (TRL 0.9+ has GRPOTrainer)
+trl>=0.9.0
+
+# Dataset handling
+datasets>=2.20.0
+
+# Optional: 4-bit quantization (GPU, Linux/CUDA only)
+# bitsandbytes>=0.43.0
+
+# Optional: faster inference during rollout
+# vllm>=0.4.0
+
+# Already in pyproject.toml — kept here for convenience
+requests>=2.33.1
