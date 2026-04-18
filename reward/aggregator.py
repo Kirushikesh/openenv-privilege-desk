@@ -23,6 +23,7 @@ STEP_REWARD_MAP = {
     "workflow.check_active": 0.04,
     "approval.route":        0.02,
     "approval.check_status": 0.01,
+    "ticket.attach":         0.05,
     "access.decide":         0.02,
     "access.grant":          0.02,
     "access.set_ttl":        0.02,
@@ -37,7 +38,7 @@ _WRONG_APPROVER = 0.01 # wrong routing
 
 def _clamp_step(score: float) -> float:
     """Clamp step reward strictly to (0.01, 0.99)."""
-    return min(max(round(score, 4), 0.10), 0.90)
+    return min(max(round(score, 4), 0.01), 0.99)
 
 
 class RewardAggregator:

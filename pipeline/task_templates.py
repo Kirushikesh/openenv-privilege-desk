@@ -67,7 +67,8 @@ TASK_TEMPLATES: Dict[str, Dict[str, Any]] = {
             "org.get_user", "org.get_manager", "org.list_users",
             "request.view", "request.list",
             "approval.route", "approval.check_status",
-            "access.grant", "access.set_ttl",
+            "ticket.attach",
+            "access.grant", "access.deny", "access.set_ttl",
             "entitlement.list",
         ],
         "required_entities": {
@@ -102,7 +103,7 @@ TASK_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "task_id": "access_review",
         "difficulty": "hard",
         "task_goal": (
-            "Conduct an access review for the specified user. Inspect all of "
+            "Conduct an access review for user {review_target_user_id}. Inspect all of "
             "their current entitlements (including those inherited through "
             "groups), cross-reference with the audit log to identify unused or "
             "stale access, flag over-privileged grants, and revoke the minimum "

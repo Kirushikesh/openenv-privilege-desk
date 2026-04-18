@@ -154,3 +154,8 @@ cython_debug/
 .openenv/
 logs/
 temp/
+
+hackathon_docs/
+.gemini/
+my_notes/
+competitor_research/

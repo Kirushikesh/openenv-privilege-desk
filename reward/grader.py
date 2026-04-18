@@ -10,13 +10,13 @@ All graders clamp final output to [0.01, 0.99].
 from typing import Any, Dict
 
 # Score bounds: strictly between 0 and 1 (hackathon Phase 2 requirement)
-_MIN = 0.10
-_MAX = 0.90
+_MIN = 0.01
+_MAX = 0.99
 
 
 def _clamp(score: float) -> float:
     """Ensure score is strictly in (0, 1) — never exactly 0.0 or 1.0."""
-    return min(max(round(score, 4), 0.10), 0.90)
+    return min(max(round(score, 4), 0.01), 0.99)
 
 
 def _clamp_breakdown(scores: dict) -> dict:
@@ -199,13 +199,27 @@ def grade_jit_escalation(world_state: Dict[str, Any]) -> Dict[str, Any]:
 
     # 6. Final decision
     grant_activated = completion.get("grant_activated", False)
+    grant_denied = completion.get("grant_denied", False)
     should_approve = correct_d.get("should_approve", True)
+
     if grant_activated and should_approve:
+        # Correctly activated an approved grant
         scores["correct_final_decision"] = 1.0
-    elif not grant_activated and not should_approve:
+    elif grant_denied and not should_approve:
+        # Correctly denied an invalid escalation
         scores["correct_final_decision"] = 1.0
+    elif not grant_activated and not grant_denied and not should_approve:
+        # Correct outcome (not granted) but via timeout instead of explicit deny
+        scores["correct_final_decision"] = 0.5
+    else:
+        # Wrong decision (e.g. granted when should have denied, or vice versa)
+        scores["correct_final_decision"] = 0.0
+
     details["final_decision"] = {
-        "grant_activated": grant_activated, "should_approve": should_approve}
+        "grant_activated": grant_activated,
+        "grant_denied": grant_denied,
+        "should_approve": should_approve
+    }
 
     scores = _clamp_breakdown(scores)
     total = _clamp(sum(scores[k] * weights[k] for k in weights))

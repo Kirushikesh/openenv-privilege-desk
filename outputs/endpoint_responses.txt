@@ -1,0 +1,1131 @@
+[
+    {
+        "endpoint": "/tasks",
+        "method": "GET",
+        "request_payload": null,
+        "response": [
+            {
+                "id": "access_decision",
+                "name": "Access Decision",
+                "description": "A new access request has arrived. Review the pending request, inspect the requester's current entitlements and the applicable policy, then make a decision: approve or deny the request. If approving, select the correct role and set an appropriate TTL. Use the access.decide tool to submit your decision.",
+                "difficulty": "easy",
+                "grader": "graders.access_decision_grader",
+                "time_limit_seconds": 600,
+                "max_steps": 5,
+                "available_tools": [
+                    "policy.lookup",
+                    "policy.list",
+                    "org.get_user",
+                    "entitlement.list",
+                    "request.view",
+                    "access.decide"
+                ],
+                "grading_weights": {
+                    "correct_decision": 0.4,
+                    "correct_role": 0.25,
+                    "correct_ttl": 0.2,
+                    "correct_justification": 0.15
+                },
+                "action_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "enum": [
+                                "policy.lookup",
+                                "policy.list",
+                                "org.get_user",
+                                "entitlement.list",
+                                "request.view",
+                                "access.decide"
+                            ],
+                            "description": "Tool to call"
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Tool-specific arguments"
+                        }
+                    },
+                    "required": [
+                        "tool_name"
+                    ]
+                }
+            },
+            {
+                "id": "jit_escalation",
+                "name": "Jit Escalation",
+                "description": "An engineer needs urgent temporary elevated access to a production system. Process this JIT (just-in-time) escalation request: look up the applicable policy, identify all required approvers in the correct order, route the request through the approval chain, attach the incident ticket as justification, set the correct TTL, and activate the temporary grant once approved. If any approval is denied or policy violated, deny the escalation.",
+                "difficulty": "medium",
+                "grader": "graders.jit_escalation_grader",
+                "time_limit_seconds": 600,
+                "max_steps": 15,
+                "available_tools": [
+                    "policy.lookup",
+                    "policy.list",
+                    "org.get_user",
+                    "org.get_manager",
+                    "org.list_users",
+                    "request.view",
+                    "request.list",
+                    "approval.route",
+                    "approval.check_status",
+                    "access.grant",
+                    "access.set_ttl",
+                    "entitlement.list"
+                ],
+                "grading_weights": {
+                    "correct_approvers": 0.2,
+                    "correct_routing_order": 0.15,
+                    "ticket_attached": 0.15,
+                    "correct_role": 0.15,
+                    "correct_ttl": 0.15,
+                    "correct_final_decision": 0.2
+                },
+                "action_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "enum": [
+                                "policy.lookup",
+                                "policy.list",
+                                "org.get_user",
+                                "org.get_manager",
+                                "org.list_users",
+                                "request.view",
+                                "request.list",
+                                "approval.route",
+                                "approval.check_status",
+                                "access.grant",
+                                "access.set_ttl",
+                                "entitlement.list"
+                            ],
+                            "description": "Tool to call"
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Tool-specific arguments"
+                        }
+                    },
+                    "required": [
+                        "tool_name"
+                    ]
+                }
+            },
+            {
+                "id": "access_review",
+                "name": "Access Review",
+                "description": "Conduct an access review for the specified user. Inspect all of their current entitlements (including those inherited through groups), cross-reference with the audit log to identify unused or stale access, flag over-privileged grants, and revoke the minimum set of risky entitlements \u2014 while preserving access that is needed for active workflows. Submit your review when complete.",
+                "difficulty": "hard",
+                "grader": "graders.access_review_grader",
+                "time_limit_seconds": 600,
+                "max_steps": 25,
+                "available_tools": [
+                    "policy.lookup",
+                    "policy.list",
+                    "org.get_user",
+                    "org.list_users",
+                    "entitlement.list",
+                    "entitlement.inspect",
+                    "entitlement.revoke",
+                    "audit.query",
+                    "group.resolve",
+                    "workflow.check_active",
+                    "review.submit"
+                ],
+                "grading_weights": {
+                    "precision": 0.3,
+                    "recall": 0.3,
+                    "workflow_preservation": 0.2,
+                    "policy_compliance": 0.1,
+                    "review_submitted": 0.1
+                },
+                "action_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "enum": [
+                                "policy.lookup",
+                                "policy.list",
+                                "org.get_user",
+                                "org.list_users",
+                                "entitlement.list",
+                                "entitlement.inspect",
+                                "entitlement.revoke",
+                                "audit.query",
+                                "group.resolve",
+                                "workflow.check_active",
+                                "review.submit"
+                            ],
+                            "description": "Tool to call"
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Tool-specific arguments"
+                        }
+                    },
+                    "required": [
+                        "tool_name"
+                    ]
+                }
+            }
+        ]
+    },
+    {
+        "endpoint": "/schema",
+        "method": "GET",
+        "request_payload": null,
+        "response": {
+            "action": {
+                "additionalProperties": false,
+                "description": "Action for PrivilegeDesk \u2014 a structured tool call.",
+                "properties": {
+                    "metadata": {
+                        "additionalProperties": true,
+                        "description": "Additional metadata for the action",
+                        "title": "Metadata",
+                        "type": "object"
+                    },
+                    "tool_name": {
+                        "description": "Name of the tool to call e.g. 'policy.lookup', 'access.decide', 'entitlement.revoke'. Check available_tools in the observation.",
+                        "title": "Tool Name",
+                        "type": "string"
+                    },
+                    "arguments": {
+                        "additionalProperties": true,
+                        "description": "Tool-specific arguments as key-value pairs",
+                        "title": "Arguments",
+                        "type": "object"
+                    }
+                },
+                "required": [
+                    "tool_name"
+                ],
+                "title": "PrivilegeDeskAction",
+                "type": "object"
+            },
+            "observation": {
+                "additionalProperties": false,
+                "description": "Observation from PrivilegeDesk \u2014 the agent's partial view of the IAM world.",
+                "properties": {
+                    "done": {
+                        "default": false,
+                        "description": "Whether the episode has terminated",
+                        "title": "Done",
+                        "type": "boolean"
+                    },
+                    "reward": {
+                        "anyOf": [
+                            {
+                                "type": "boolean"
+                            },
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Reward signal from the last action",
+                        "title": "Reward"
+                    },
+                    "metadata": {
+                        "additionalProperties": true,
+                        "description": "Additional metadata for the observation",
+                        "title": "Metadata",
+                        "type": "object"
+                    },
+                    "task_id": {
+                        "default": "",
+                        "description": "Active task identifier",
+                        "title": "Task Id",
+                        "type": "string"
+                    },
+                    "task_goal": {
+                        "default": "",
+                        "description": "Natural language description of the goal",
+                        "title": "Task Goal",
+                        "type": "string"
+                    },
+                    "step": {
+                        "default": 0,
+                        "description": "Current step number",
+                        "title": "Step",
+                        "type": "integer"
+                    },
+                    "max_steps": {
+                        "default": 25,
+                        "description": "Maximum steps before truncation",
+                        "title": "Max Steps",
+                        "type": "integer"
+                    },
+                    "current_time": {
+                        "default": "",
+                        "description": "Simulated current time (ISO)",
+                        "title": "Current Time",
+                        "type": "string"
+                    },
+                    "available_tools": {
+                        "description": "Tools available for this task",
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "Available Tools",
+                        "type": "array"
+                    },
+                    "users": {
+                        "additionalProperties": true,
+                        "description": "Users in the org",
+                        "title": "Users",
+                        "type": "object"
+                    },
+                    "org_graph": {
+                        "additionalProperties": true,
+                        "description": "Manager hierarchy",
+                        "title": "Org Graph",
+                        "type": "object"
+                    },
+                    "resources": {
+                        "additionalProperties": true,
+                        "description": "Resources (databases, repos, etc.)",
+                        "title": "Resources",
+                        "type": "object"
+                    },
+                    "policies": {
+                        "additionalProperties": true,
+                        "description": "Access policies",
+                        "title": "Policies",
+                        "type": "object"
+                    },
+                    "groups": {
+                        "additionalProperties": true,
+                        "description": "User groups",
+                        "title": "Groups",
+                        "type": "object"
+                    },
+                    "entitlements": {
+                        "additionalProperties": true,
+                        "description": "Current entitlements (sanitized)",
+                        "title": "Entitlements",
+                        "type": "object"
+                    },
+                    "pending_requests": {
+                        "additionalProperties": true,
+                        "description": "Pending access requests",
+                        "title": "Pending Requests",
+                        "type": "object"
+                    },
+                    "approval_chains": {
+                        "additionalProperties": true,
+                        "description": "Approval chain state",
+                        "title": "Approval Chains",
+                        "type": "object"
+                    },
+                    "workflows": {
+                        "additionalProperties": true,
+                        "description": "Active workflows",
+                        "title": "Workflows",
+                        "type": "object"
+                    },
+                    "objectives": {
+                        "description": "Task subgoals",
+                        "items": {
+                            "additionalProperties": true,
+                            "type": "object"
+                        },
+                        "title": "Objectives",
+                        "type": "array"
+                    },
+                    "audit_log": {
+                        "description": "Last 5 actions taken",
+                        "items": {
+                            "additionalProperties": true,
+                            "type": "object"
+                        },
+                        "title": "Audit Log",
+                        "type": "array"
+                    },
+                    "notifications": {
+                        "description": "System notifications",
+                        "items": {
+                            "additionalProperties": true,
+                            "type": "object"
+                        },
+                        "title": "Notifications",
+                        "type": "array"
+                    },
+                    "review_target_user_id": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "User to review (access_review task)",
+                        "title": "Review Target User Id"
+                    },
+                    "tool_result": {
+                        "anyOf": [
+                            {
+                                "additionalProperties": true,
+                                "type": "object"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Result of the last tool call",
+                        "title": "Tool Result"
+                    }
+                },
+                "title": "PrivilegeDeskObservation",
+                "type": "object"
+            },
+            "state": {
+                "additionalProperties": true,
+                "description": "Base class for environment state.\n\nRepresents internal environment state, separate from observations.",
+                "properties": {
+                    "episode_id": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Unique identifier for the current episode",
+                        "title": "Episode Id"
+                    },
+                    "step_count": {
+                        "default": 0,
+                        "description": "Number of steps taken in the current episode",
+                        "minimum": 0,
+                        "title": "Step Count",
+                        "type": "integer"
+                    }
+                },
+                "title": "State",
+                "type": "object"
+            }
+        }
+    },
+    {
+        "endpoint": "/reset",
+        "method": "POST",
+        "request_payload": {
+            "task_id": "access_decision",
+            "seed": 42,
+            "difficulty_level": 1
+        },
+        "response": {
+            "observation": {
+                "task_id": "access_decision",
+                "task_goal": "A new access request has arrived. Review the pending request, inspect the requester's current entitlements and the applicable policy, then make a decision: approve or deny the request. If approving, select the correct role and set an appropriate TTL. Use the access.decide tool to submit your decision.",
+                "step": 0,
+                "max_steps": 5,
+                "current_time": "2024-04-08T09:00:00",
+                "available_tools": [
+                    "policy.lookup",
+                    "policy.list",
+                    "org.get_user",
+                    "entitlement.list",
+                    "request.view",
+                    "access.decide"
+                ],
+                "users": {
+                    "user_000": {
+                        "user_id": "user_000",
+                        "name": "Alice Kim",
+                        "email": "alice.kim@company.com",
+                        "department": "Engineering",
+                        "job_title": "Engineering Manager",
+                        "is_manager": true,
+                        "manager_id": null,
+                        "status": "active"
+                    },
+                    "user_001": {
+                        "user_id": "user_001",
+                        "name": "Xander Harris",
+                        "email": "xander.harris@company.com",
+                        "department": "Engineering",
+                        "job_title": "Software Engineer",
+                        "is_manager": false,
+                        "manager_id": "user_000",
+                        "status": "active"
+                    },
+                    "user_002": {
+                        "user_id": "user_002",
+                        "name": "Iris Patel",
+                        "email": "iris.patel@company.com",
+                        "department": "Finance",
+                        "job_title": "Data Analyst",
+                        "is_manager": false,
+                        "manager_id": "user_000",
+                        "status": "active"
+                    },
+                    "user_003": {
+                        "user_id": "user_003",
+                        "name": "Henry Martin",
+                        "email": "henry.martin@company.com",
+                        "department": "Marketing",
+                        "job_title": "Security Engineer",
+                        "is_manager": false,
+                        "manager_id": "user_000",
+                        "status": "active"
+                    },
+                    "user_004": {
+                        "user_id": "user_004",
+                        "name": "Eva Anderson",
+                        "email": "eva.anderson@company.com",
+                        "department": "Engineering",
+                        "job_title": "Security Engineer",
+                        "is_manager": false,
+                        "manager_id": "user_000",
+                        "status": "active"
+                    }
+                },
+                "org_graph": {
+                    "user_000": {
+                        "reports_to": null,
+                        "department": "Engineering"
+                    },
+                    "user_001": {
+                        "reports_to": "user_000",
+                        "department": "Engineering"
+                    },
+                    "user_002": {
+                        "reports_to": "user_000",
+                        "department": "Finance"
+                    },
+                    "user_003": {
+                        "reports_to": "user_000",
+                        "department": "Marketing"
+                    },
+                    "user_004": {
+                        "reports_to": "user_000",
+                        "department": "Engineering"
+                    }
+                },
+                "resources": {
+                    "res_000": {
+                        "resource_id": "res_000",
+                        "name": "logs",
+                        "type": "storage_bucket",
+                        "owner_team": "Marketing",
+                        "sensitivity": "high",
+                        "description": "logs (storage_bucket)"
+                    },
+                    "res_001": {
+                        "resource_id": "res_001",
+                        "name": "raw-data",
+                        "type": "storage_bucket",
+                        "owner_team": "Finance",
+                        "sensitivity": "critical",
+                        "description": "raw-data (storage_bucket)"
+                    },
+                    "res_002": {
+                        "resource_id": "res_002",
+                        "name": "ml-gcp",
+                        "type": "cloud_project",
+                        "owner_team": "Legal",
+                        "sensitivity": "medium",
+                        "description": "ml-gcp (cloud_project)"
+                    }
+                },
+                "policies": {
+                    "policy_000": {
+                        "policy_id": "policy_000",
+                        "resource_id": "res_000",
+                        "resource_type": "storage_bucket",
+                        "max_role": "editor",
+                        "max_ttl_hours": 4,
+                        "requires_approval_from": [
+                            "manager",
+                            "resource_owner"
+                        ],
+                        "allowed_departments": [
+                            "Security"
+                        ],
+                        "description": "Access to logs: max role=editor, max TTL=4h, approvals=['manager', 'resource_owner']"
+                    },
+                    "policy_001": {
+                        "policy_id": "policy_001",
+                        "resource_id": "res_001",
+                        "resource_type": "storage_bucket",
+                        "max_role": "viewer",
+                        "max_ttl_hours": 1,
+                        "requires_approval_from": [
+                            "manager",
+                            "resource_owner",
+                            "security_team"
+                        ],
+                        "allowed_departments": [
+                            "Legal",
+                            "Marketing",
+                            "Operations"
+                        ],
+                        "description": "Access to raw-data: max role=viewer, max TTL=1h, approvals=['manager', 'resource_owner', 'security_team']"
+                    },
+                    "policy_002": {
+                        "policy_id": "policy_002",
+                        "resource_id": "res_002",
+                        "resource_type": "cloud_project",
+                        "max_role": "editor",
+                        "max_ttl_hours": 24,
+                        "requires_approval_from": [
+                            "manager"
+                        ],
+                        "allowed_departments": [
+                            "Security"
+                        ],
+                        "description": "Access to ml-gcp: max role=editor, max TTL=24h, approvals=['manager']"
+                    }
+                },
+                "groups": {},
+                "entitlements": {
+                    "ent_000": {
+                        "entitlement_id": "ent_000",
+                        "user_id": "user_004",
+                        "resource_id": "res_001",
+                        "role": "admin",
+                        "is_temporary": true,
+                        "granted_at": "2023-11-12T09:00:00",
+                        "expires_at": "2023-11-12T17:00:00",
+                        "granted_by": "user_000",
+                        "last_used": "2024-02-10T09:00:00",
+                        "days_since_use": 58,
+                        "source": "direct"
+                    },
+                    "ent_001": {
+                        "entitlement_id": "ent_001",
+                        "user_id": "user_001",
+                        "resource_id": "res_001",
+                        "role": "viewer",
+                        "is_temporary": true,
+                        "granted_at": "2024-02-08T09:00:00",
+                        "expires_at": "2024-02-08T11:00:00",
+                        "granted_by": "user_002",
+                        "last_used": "2024-03-03T09:00:00",
+                        "days_since_use": 36,
+                        "source": "group_inherited"
+                    },
+                    "ent_002": {
+                        "entitlement_id": "ent_002",
+                        "user_id": "user_002",
+                        "resource_id": "res_000",
+                        "role": "admin",
+                        "is_temporary": true,
+                        "granted_at": "2024-01-08T09:00:00",
+                        "expires_at": "2024-01-08T17:00:00",
+                        "granted_by": "user_002",
+                        "last_used": "2024-04-02T09:00:00",
+                        "days_since_use": 6,
+                        "source": "direct"
+                    },
+                    "ent_003": {
+                        "entitlement_id": "ent_003",
+                        "user_id": "user_004",
+                        "resource_id": "res_002",
+                        "role": "editor",
+                        "is_temporary": true,
+                        "granted_at": "2023-11-23T09:00:00",
+                        "expires_at": "2023-11-23T17:00:00",
+                        "granted_by": "user_003",
+                        "last_used": "2023-12-13T09:00:00",
+                        "days_since_use": 117,
+                        "source": "group_inherited"
+                    },
+                    "ent_004": {
+                        "entitlement_id": "ent_004",
+                        "user_id": "user_002",
+                        "resource_id": "res_002",
+                        "role": "editor",
+                        "is_temporary": true,
+                        "granted_at": "2023-10-15T09:00:00",
+                        "expires_at": "2023-10-17T09:00:00",
+                        "granted_by": "user_001",
+                        "last_used": "2023-10-22T09:00:00",
+                        "days_since_use": 169,
+                        "source": "direct"
+                    },
+                    "ent_005": {
+                        "entitlement_id": "ent_005",
+                        "user_id": "user_002",
+                        "resource_id": "res_001",
+                        "role": "admin",
+                        "is_temporary": true,
+                        "granted_at": "2024-03-22T09:00:00",
+                        "expires_at": "2024-03-22T17:00:00",
+                        "granted_by": "user_001",
+                        "last_used": "2024-04-01T09:00:00",
+                        "days_since_use": 7,
+                        "source": "group_inherited"
+                    }
+                },
+                "pending_requests": {
+                    "req_000": {
+                        "request_id": "req_000",
+                        "requester_id": "user_003",
+                        "resource_id": "res_000",
+                        "resource_name": "logs",
+                        "resource_type": "storage_bucket",
+                        "requested_role": "admin",
+                        "reason": "Client demo setup needs temporary access",
+                        "ticket_id": "SEC-5040",
+                        "status": "pending",
+                        "submitted_at": "2024-04-08T08:30:00",
+                        "applicable_policy_id": "policy_000"
+                    }
+                },
+                "approval_chains": {},
+                "workflows": {},
+                "audit_log": [],
+                "notifications": [],
+                "objectives": [
+                    {
+                        "id": "sg_view_request",
+                        "description": "View the pending access request"
+                    },
+                    {
+                        "id": "sg_lookup_policy",
+                        "description": "Look up the applicable policy"
+                    },
+                    {
+                        "id": "sg_check_existing",
+                        "description": "Check requester's existing entitlements"
+                    },
+                    {
+                        "id": "sg_decide",
+                        "description": "Submit the access decision (approve/deny)"
+                    }
+                ]
+            },
+            "reward": 0.0,
+            "done": false,
+            "info": {
+                "task_id": "access_decision",
+                "seed": 42,
+                "episode": "started"
+            }
+        }
+    },
+    {
+        "endpoint": "/step",
+        "method": "POST",
+        "request_payload": {
+            "action": {
+                "tool_name": "policy.list",
+                "arguments": {}
+            }
+        },
+        "response": {
+            "observation": {
+                "task_id": "access_decision",
+                "task_goal": "A new access request has arrived. Review the pending request, inspect the requester's current entitlements and the applicable policy, then make a decision: approve or deny the request. If approving, select the correct role and set an appropriate TTL. Use the access.decide tool to submit your decision.",
+                "step": 1,
+                "max_steps": 5,
+                "current_time": "2024-04-08T09:00:00",
+                "available_tools": [
+                    "policy.lookup",
+                    "policy.list",
+                    "org.get_user",
+                    "entitlement.list",
+                    "request.view",
+                    "access.decide"
+                ],
+                "users": {
+                    "user_000": {
+                        "user_id": "user_000",
+                        "name": "Alice Kim",
+                        "email": "alice.kim@company.com",
+                        "department": "Engineering",
+                        "job_title": "Engineering Manager",
+                        "is_manager": true,
+                        "manager_id": null,
+                        "status": "active"
+                    },
+                    "user_001": {
+                        "user_id": "user_001",
+                        "name": "Xander Harris",
+                        "email": "xander.harris@company.com",
+                        "department": "Engineering",
+                        "job_title": "Software Engineer",
+                        "is_manager": false,
+                        "manager_id": "user_000",
+                        "status": "active"
+                    },
+                    "user_002": {
+                        "user_id": "user_002",
+                        "name": "Iris Patel",
+                        "email": "iris.patel@company.com",
+                        "department": "Finance",
+                        "job_title": "Data Analyst",
+                        "is_manager": false,
+                        "manager_id": "user_000",
+                        "status": "active"
+                    },
+                    "user_003": {
+                        "user_id": "user_003",
+                        "name": "Henry Martin",
+                        "email": "henry.martin@company.com",
+                        "department": "Marketing",
+                        "job_title": "Security Engineer",
+                        "is_manager": false,
+                        "manager_id": "user_000",
+                        "status": "active"
+                    },
+                    "user_004": {
+                        "user_id": "user_004",
+                        "name": "Eva Anderson",
+                        "email": "eva.anderson@company.com",
+                        "department": "Engineering",
+                        "job_title": "Security Engineer",
+                        "is_manager": false,
+                        "manager_id": "user_000",
+                        "status": "active"
+                    }
+                },
+                "org_graph": {
+                    "user_000": {
+                        "reports_to": null,
+                        "department": "Engineering"
+                    },
+                    "user_001": {
+                        "reports_to": "user_000",
+                        "department": "Engineering"
+                    },
+                    "user_002": {
+                        "reports_to": "user_000",
+                        "department": "Finance"
+                    },
+                    "user_003": {
+                        "reports_to": "user_000",
+                        "department": "Marketing"
+                    },
+                    "user_004": {
+                        "reports_to": "user_000",
+                        "department": "Engineering"
+                    }
+                },
+                "resources": {
+                    "res_000": {
+                        "resource_id": "res_000",
+                        "name": "logs",
+                        "type": "storage_bucket",
+                        "owner_team": "Marketing",
+                        "sensitivity": "high",
+                        "description": "logs (storage_bucket)"
+                    },
+                    "res_001": {
+                        "resource_id": "res_001",
+                        "name": "raw-data",
+                        "type": "storage_bucket",
+                        "owner_team": "Finance",
+                        "sensitivity": "critical",
+                        "description": "raw-data (storage_bucket)"
+                    },
+                    "res_002": {
+                        "resource_id": "res_002",
+                        "name": "ml-gcp",
+                        "type": "cloud_project",
+                        "owner_team": "Legal",
+                        "sensitivity": "medium",
+                        "description": "ml-gcp (cloud_project)"
+                    }
+                },
+                "policies": {
+                    "policy_000": {
+                        "policy_id": "policy_000",
+                        "resource_id": "res_000",
+                        "resource_type": "storage_bucket",
+                        "max_role": "editor",
+                        "max_ttl_hours": 4,
+                        "requires_approval_from": [
+                            "manager",
+                            "resource_owner"
+                        ],
+                        "allowed_departments": [
+                            "Security"
+                        ],
+                        "description": "Access to logs: max role=editor, max TTL=4h, approvals=['manager', 'resource_owner']"
+                    },
+                    "policy_001": {
+                        "policy_id": "policy_001",
+                        "resource_id": "res_001",
+                        "resource_type": "storage_bucket",
+                        "max_role": "viewer",
+                        "max_ttl_hours": 1,
+                        "requires_approval_from": [
+                            "manager",
+                            "resource_owner",
+                            "security_team"
+                        ],
+                        "allowed_departments": [
+                            "Legal",
+                            "Marketing",
+                            "Operations"
+                        ],
+                        "description": "Access to raw-data: max role=viewer, max TTL=1h, approvals=['manager', 'resource_owner', 'security_team']"
+                    },
+                    "policy_002": {
+                        "policy_id": "policy_002",
+                        "resource_id": "res_002",
+                        "resource_type": "cloud_project",
+                        "max_role": "editor",
+                        "max_ttl_hours": 24,
+                        "requires_approval_from": [
+                            "manager"
+                        ],
+                        "allowed_departments": [
+                            "Security"
+                        ],
+                        "description": "Access to ml-gcp: max role=editor, max TTL=24h, approvals=['manager']"
+                    }
+                },
+                "groups": {},
+                "entitlements": {
+                    "ent_000": {
+                        "entitlement_id": "ent_000",
+                        "user_id": "user_004",
+                        "resource_id": "res_001",
+                        "role": "admin",
+                        "is_temporary": true,
+                        "granted_at": "2023-11-12T09:00:00",
+                        "expires_at": "2023-11-12T17:00:00",
+                        "granted_by": "user_000",
+                        "last_used": "2024-02-10T09:00:00",
+                        "days_since_use": 58,
+                        "source": "direct"
+                    },
+                    "ent_001": {
+                        "entitlement_id": "ent_001",
+                        "user_id": "user_001",
+                        "resource_id": "res_001",
+                        "role": "viewer",
+                        "is_temporary": true,
+                        "granted_at": "2024-02-08T09:00:00",
+                        "expires_at": "2024-02-08T11:00:00",
+                        "granted_by": "user_002",
+                        "last_used": "2024-03-03T09:00:00",
+                        "days_since_use": 36,
+                        "source": "group_inherited"
+                    },
+                    "ent_002": {
+                        "entitlement_id": "ent_002",
+                        "user_id": "user_002",
+                        "resource_id": "res_000",
+                        "role": "admin",
+                        "is_temporary": true,
+                        "granted_at": "2024-01-08T09:00:00",
+                        "expires_at": "2024-01-08T17:00:00",
+                        "granted_by": "user_002",
+                        "last_used": "2024-04-02T09:00:00",
+                        "days_since_use": 6,
+                        "source": "direct"
+                    },
+                    "ent_003": {
+                        "entitlement_id": "ent_003",
+                        "user_id": "user_004",
+                        "resource_id": "res_002",
+                        "role": "editor",
+                        "is_temporary": true,
+                        "granted_at": "2023-11-23T09:00:00",
+                        "expires_at": "2023-11-23T17:00:00",
+                        "granted_by": "user_003",
+                        "last_used": "2023-12-13T09:00:00",
+                        "days_since_use": 117,
+                        "source": "group_inherited"
+                    },
+                    "ent_004": {
+                        "entitlement_id": "ent_004",
+                        "user_id": "user_002",
+                        "resource_id": "res_002",
+                        "role": "editor",
+                        "is_temporary": true,
+                        "granted_at": "2023-10-15T09:00:00",
+                        "expires_at": "2023-10-17T09:00:00",
+                        "granted_by": "user_001",
+                        "last_used": "2023-10-22T09:00:00",
+                        "days_since_use": 169,
+                        "source": "direct"
+                    },
+                    "ent_005": {
+                        "entitlement_id": "ent_005",
+                        "user_id": "user_002",
+                        "resource_id": "res_001",
+                        "role": "admin",
+                        "is_temporary": true,
+                        "granted_at": "2024-03-22T09:00:00",
+                        "expires_at": "2024-03-22T17:00:00",
+                        "granted_by": "user_001",
+                        "last_used": "2024-04-01T09:00:00",
+                        "days_since_use": 7,
+                        "source": "group_inherited"
+                    }
+                },
+                "pending_requests": {
+                    "req_000": {
+                        "request_id": "req_000",
+                        "requester_id": "user_003",
+                        "resource_id": "res_000",
+                        "resource_name": "logs",
+                        "resource_type": "storage_bucket",
+                        "requested_role": "admin",
+                        "reason": "Client demo setup needs temporary access",
+                        "ticket_id": "SEC-5040",
+                        "status": "pending",
+                        "submitted_at": "2024-04-08T08:30:00",
+                        "applicable_policy_id": "policy_000"
+                    }
+                },
+                "approval_chains": {},
+                "workflows": {},
+                "audit_log": [
+                    {
+                        "step": 1,
+                        "timestamp": "2026-04-18T13:22:31.017245",
+                        "tool_name": "policy.list",
+                        "arguments": {},
+                        "status": "success",
+                        "observations": [
+                            "Found 3 policies"
+                        ]
+                    }
+                ],
+                "notifications": [],
+                "objectives": [
+                    {
+                        "id": "sg_view_request",
+                        "description": "View the pending access request"
+                    },
+                    {
+                        "id": "sg_lookup_policy",
+                        "description": "Look up the applicable policy"
+                    },
+                    {
+                        "id": "sg_check_existing",
+                        "description": "Check requester's existing entitlements"
+                    },
+                    {
+                        "id": "sg_decide",
+                        "description": "Submit the access decision (approve/deny)"
+                    }
+                ]
+            },
+            "reward": 0.1,
+            "done": false,
+            "info": {
+                "step": 1,
+                "tool_result": {
+                    "status": "success",
+                    "result": {
+                        "policies": [
+                            {
+                                "policy_id": "policy_000",
+                                "resource_id": "res_000",
+                                "resource_type": "storage_bucket",
+                                "max_role": "editor",
+                                "max_ttl_hours": 4,
+                                "requires_approval_from": [
+                                    "manager",
+                                    "resource_owner"
+                                ],
+                                "allowed_departments": [
+                                    "Security"
+                                ],
+                                "description": "Access to logs: max role=editor, max TTL=4h, approvals=['manager', 'resource_owner']"
+                            },
+                            {
+                                "policy_id": "policy_001",
+                                "resource_id": "res_001",
+                                "resource_type": "storage_bucket",
+                                "max_role": "viewer",
+                                "max_ttl_hours": 1,
+                                "requires_approval_from": [
+                                    "manager",
+                                    "resource_owner",
+                                    "security_team"
+                                ],
+                                "allowed_departments": [
+                                    "Legal",
+                                    "Marketing",
+                                    "Operations"
+                                ],
+                                "description": "Access to raw-data: max role=viewer, max TTL=1h, approvals=['manager', 'resource_owner', 'security_team']"
+                            },
+                            {
+                                "policy_id": "policy_002",
+                                "resource_id": "res_002",
+                                "resource_type": "cloud_project",
+                                "max_role": "editor",
+                                "max_ttl_hours": 24,
+                                "requires_approval_from": [
+                                    "manager"
+                                ],
+                                "allowed_departments": [
+                                    "Security"
+                                ],
+                                "description": "Access to ml-gcp: max role=editor, max TTL=24h, approvals=['manager']"
+                            }
+                        ],
+                        "count": 3
+                    },
+                    "observations": [
+                        "Found 3 policies"
+                    ],
+                    "state_delta": {
+                        "completion_state.subgoal_status.sg_lookup_policy": "completed"
+                    }
+                },
+                "step_reward": 0.1,
+                "episode_reward": 0.1
+            }
+        }
+    },
+    {
+        "endpoint": "/state",
+        "method": "GET",
+        "request_payload": null,
+        "response": {
+            "episode_id": "075bb826-b054-493e-831b-6c1c2cf22789",
+            "step_count": 0
+        }
+    },
+    {
+        "endpoint": "/grader",
+        "method": "POST",
+        "request_payload": null,
+        "response": {
+            "task_id": "access_decision",
+            "score": 0.1,
+            "breakdown": {
+                "correct_decision": 0.1,
+                "correct_role": 0.1,
+                "correct_ttl": 0.1,
+                "correct_justification": 0.1
+            },
+            "weights": {
+                "correct_decision": 0.4,
+                "correct_role": 0.25,
+                "correct_ttl": 0.2,
+                "correct_justification": 0.15
+            },
+            "details": {
+                "error": "No decision was submitted"
+            },
+            "steps_taken": 1,
+            "episode_done": false
+        }
+    }
+]

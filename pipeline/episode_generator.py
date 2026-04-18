@@ -63,42 +63,79 @@ class EpisodeGenerator:
     ) -> Dict[str, Any]:
         """Generate a complete WorldState for one episode.
 
+        Args:
+            difficulty_level: 1 (easy) → uses lower bound of entity ranges.
+                              2 (medium) → uses midpoint.
+                              3 (hard) → uses upper bound.
+
         Returns:
             world_state dict with 'visible' and 'hidden_state' sections.
         """
         seed = seed if seed is not None else random.randint(0, 999_999)
-        rng = random.Random(seed)
+
+        # Two independent RNGs:
+        #   content_rng — seeded only by `seed`, drives all world content (names,
+        #                 resources, policies, …). Changing difficulty_level does NOT
+        #                 affect this stream, so the same seed always produces the
+        #                 same world identity regardless of difficulty.
+        #   count_rng   — seeded by seed XOR difficulty_level, used only for the
+        #                 ±1 jitter on entity counts. Deterministic for a given
+        #                 (seed, difficulty_level) pair but independent of content_rng.
+        content_rng = random.Random(seed)
+        count_rng   = random.Random(seed ^ (difficulty_level * 0x9e3779b9))
+
+        # Keep `rng` as an alias for content_rng so the rest of the file is unchanged
+        rng = content_rng
 
         template = get_task(task_id)
         entity_counts = template["required_entities"]
 
+        # Scale entity counts based on difficulty level (1=min, 3=max)
+        def scaled_count(lo: int, hi: int) -> int:
+            """Linearly interpolate between lo and hi based on difficulty (1–3).
+
+            Uses count_rng for jitter so the content_rng stream is never
+            consumed during the sizing phase — keeping world content stable
+            across difficulty levels for the same seed.
+            """
+            level = max(1, min(3, difficulty_level))
+            t = (level - 1) / 2.0  # 0.0 at level 1, 0.5 at level 2, 1.0 at level 3
+            base = int(round(lo + t * (hi - lo)))
+            # ±1 jitter via count_rng — does not touch content_rng
+            return max(lo, min(hi, base + count_rng.randint(-1, 1)))
+
+        # Also scale max_steps: level 1 → 60% of template max, level 3 → 100%
+        template_max_steps = template["max_steps"]
+        step_scale = 0.6 + 0.2 * (max(1, min(3, difficulty_level)) - 1)  # 0.6, 0.8, 1.0
+        scaled_max_steps = max(3, int(template_max_steps * step_scale))
+
         # 1. Org chart
-        num_users = rng.randint(*entity_counts["users"])
+        num_users = scaled_count(*entity_counts["users"])
         users, org_graph = self._build_org(num_users, rng)
 
         # 2. Resources
-        num_resources = rng.randint(*entity_counts["resources"])
+        num_resources = scaled_count(*entity_counts["resources"])
         resources = self._build_resources(num_resources, rng)
 
         # 3. Policies
-        num_policies = rng.randint(*entity_counts["policies"])
+        num_policies = scaled_count(*entity_counts["policies"])
         policies = self._build_policies(resources, rng, num_policies)
 
         # 4. Groups (for access review task)
         groups: Dict[str, Any] = {}
         if "groups" in entity_counts:
-            num_groups = rng.randint(*entity_counts["groups"])
+            num_groups = scaled_count(*entity_counts["groups"])
             groups = self._build_groups(users, num_groups, rng)
 
         # 5. Existing entitlements
-        num_entitlements = rng.randint(*entity_counts["entitlements"])
+        num_entitlements = scaled_count(*entity_counts["entitlements"])
         entitlements, risky_ids = self._build_entitlements(
             users, resources, policies, num_entitlements, rng,
             add_risky=(task_id == "access_review")
         )
 
         # 6. Pending access requests
-        num_requests = rng.randint(*entity_counts.get("pending_requests", (1, 1)))
+        num_requests = scaled_count(*entity_counts.get("pending_requests", (1, 1)))
         pending_requests, correct_decisions = self._build_requests(
             users, resources, policies, entitlements, num_requests, rng
         )
@@ -113,11 +150,11 @@ class EpisodeGenerator:
         # 8. Workflows (for access review)
         workflows: Dict[str, Any] = {}
         if "workflows" in entity_counts:
-            num_wf = rng.randint(*entity_counts["workflows"])
+            num_wf = scaled_count(*entity_counts["workflows"])
             workflows = self._build_workflows(users, resources, entitlements, num_wf, rng)
 
         # 9. Audit log
-        num_audit = rng.randint(*entity_counts.get("audit_entries", (5, 10)))
+        num_audit = scaled_count(*entity_counts.get("audit_entries", (5, 10)))
         audit_log = self._build_audit_log(users, resources, entitlements, num_audit, rng)
 
         # 10. Hidden state (ground truth — never sent to agent)
@@ -152,8 +189,8 @@ class EpisodeGenerator:
             "seed": seed,
             "task_id": task_id,
             "difficulty_level": difficulty_level,
-            "task_goal": template["task_goal"],
-            "max_steps": template["max_steps"],
+            "task_goal": template["task_goal"].format(review_target_user_id=review_target_user_id) if task_id == "access_review" else template["task_goal"],
+            "max_steps": scaled_max_steps,
             "available_tools": template["available_tools"],
             "current_time": datetime(2024, 4, 8, 9, 0, 0).isoformat(),
             # Visible world
