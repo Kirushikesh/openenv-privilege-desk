@@ -6,7 +6,7 @@ functions directly via the `grader:` field in openenv.yaml WITHOUT needing
 the package to be pip-installed first.
 
 Each public function accepts a trajectory/world_state dict and returns a
-plain float strictly in (0.01, 0.99) as required by the hackathon judge.
+plain float in [0.0, 1.0] — no clamping applied.
 """
 import os
 import sys
@@ -23,7 +23,6 @@ try:
         grade_access_review      as _grade_review,
         grade_emergency_breakglass as _grade_breakglass,
         grade_separation_of_duties_audit as _grade_sod,
-        _clamp,
     )
 except ImportError:
     # Fallback for running directly from repo root
@@ -34,19 +33,18 @@ except ImportError:
         grade_access_review      as _grade_review,
         grade_emergency_breakglass as _grade_breakglass,
         grade_separation_of_duties_audit as _grade_sod,
-        _clamp,
     )
 
 
 def _float_score(grade_fn, world_state: dict) -> float:
-    """Call a grader function and extract a clamped float score."""
+    """Call a grader function and return the raw float score in [0.0, 1.0]."""
     try:
         result = grade_fn(world_state or {})
         if isinstance(result, dict):
-            return _clamp(float(result.get("score", 0.10)))
-        return _clamp(float(result))
+            return round(float(result.get("score", 0.0)), 4)
+        return round(float(result), 4)
     except Exception:
-        return 0.10  # safe floor on any error
+        return 0.0
 
 
 def access_decision_grader(trajectory: dict = None) -> float:

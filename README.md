@@ -22,15 +22,15 @@ An AI agent is dropped into a synthetic corporate IAM system and must handle rea
 | Property | Value |
 |----------|-------|
 | **Domain** | Identity & Access Management (IAM) |
-| **Tasks** | 3 (easy → medium → hard) |
-| **Tools** | 19 structured tool calls |
+| **Tasks** | 5 (easy → medium → hard) |
+| **Tools** | 27 structured tool calls |
 | **Reward** | Partial credit, 0.0–1.0, deterministic grading |
 | **Generation** | Fully procedural — unique episode per seed |
 | **API** | OpenEnv-compliant (reset / step / state / grader / tasks / baseline) |
 
 ---
 
-## The 3 Tasks
+## The 5 Tasks
 
 ### Task 1 — Access Decision (`access_decision`) · Easy
 
@@ -55,6 +55,22 @@ An AI agent is dropped into a synthetic corporate IAM system and must handle rea
 - **Steps**: 5–25
 - **Grading**: precision (30%) + recall (30%) + workflow preservation (20%) + policy compliance (10%) + submission (10%)
 - **Baseline difficulty**: ~0.2–0.4 with a well-prompted LLM
+
+### Task 4 — Emergency Break-Glass (`emergency_breakglass`) · Medium
+
+> "A production incident is active. An on-call engineer needs emergency access. Verify the incident, check policies, flag the security team, and execute a time-limited break-glass grant if valid."
+
+- **Steps**: 4–10
+- **Grading**: incident verify (15%) + role (15%) + TTL (20%) + ticket attached (15%) + security flag (15%) + final grant (20%)
+- **Baseline difficulty**: ~0.5–0.7 with a well-prompted LLM
+
+### Task 5 — SoD Audit (`separation_of_duties_audit`) · Hard
+
+> "Detect Separation of Duties (SoD) violations. Cross-reference users against a conflict matrix, check for compensating controls, and revoke conflicting entitlements to ensure compliance."
+
+- **Steps**: 10–25
+- **Grading**: violations found (30%) + false positives (15%) + correct revocations (25%) + controls recognized (10%) + submission (20%)
+- **Baseline difficulty**: ~0.2–0.3 with a well-prompted LLM
 
 ---
 
@@ -92,9 +108,9 @@ Each episode procedurally generates a complete synthetic enterprise from a seed:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/tasks` | GET | Lists all 3 tasks with schemas and grading weights. |
+| `/tasks` | GET | Lists all 5 tasks with schemas and grading weights. |
 | `/grader` | POST | Returns 0.0–1.0 episode score with full breakdown. |
-| `/baseline` | POST | Runs naive baseline agent on all 3 tasks. |
+| `/baseline` | POST | Runs naive baseline agent on all 5 tasks. |
 
 ### Reset Parameters
 
@@ -138,16 +154,24 @@ Each episode procedurally generates a complete synthetic enterprise from a seed:
 | `request.list` | — | T2 |
 | `approval.route` | `request_id`, `approver_id` | T2 |
 | `approval.check_status` | `request_id` | T2 |
+| `ticket.attach` | `request_id`, `ticket_id` | T2, T4 |
 | `access.decide` | `request_id`, `decision`, `role`, `ttl_hours`, `justification_category?` | T1 |
-| `access.grant` | `request_id` | T2 |
-| `access.set_ttl` | `request_id`, `ttl_hours` | T2 |
-| `entitlement.list` | `user_id?` | T1, T3 |
-| `entitlement.inspect` | `entitlement_id` | T3 |
-| `entitlement.revoke` | `entitlement_id`, `reason?` | T3 |
+| `access.grant` | `request_id`, `role?` | T2, T4 |
+| `access.deny` | `request_id` | T2, T4 |
+| `access.set_ttl` | `request_id`, `ttl_hours` | T2, T4 |
+| `entitlement.list` | `user_id?` | T1, T3, T5 |
+| `entitlement.inspect` | `entitlement_id` | T3, T5 |
+| `entitlement.revoke` | `entitlement_id`, `reason?` | T3, T5 |
 | `audit.query` | `user_id?`, `resource_id?`, `days?` | T3 |
+| `audit.flag` | `incident_id`, `flag_type` | T4 |
 | `group.resolve` | `group_id?` or `user_id?` | T3 |
 | `workflow.check_active` | `user_id?`, `entitlement_id?` | T3 |
 | `review.submit` | `summary?` | T3 |
+| `incident.verify` | `incident_id` | T4 |
+| `sod.get_conflict_matrix` | — | T5 |
+| `sod.check_user` | `user_id` | T5 |
+| `sod.get_compensating_controls` | `user_id`, `conflict_id?` | T5 |
+| `sod.submit_report` | `summary?` | T5 |
 
 ---
 
@@ -266,6 +290,25 @@ privilege_desk/
 | Workflow preservation | 20% | No active workflows broken |
 | Policy compliance | 10% | Remaining entitlements pass policy check |
 | Submission | 10% | `review.submit` was called |
+ 
+### Task 4: Emergency Break-Glass
+| Component | Weight | What's Checked |
+|-----------|--------|----------------|
+| Incident valid | 15% | Agent verified incident is P1/P2 and active |
+| Correct role | 15% | Requested role ≤ policy breakglass max_role |
+| Correct TTL | 20% | TTL ≤ policy breakglass_max_ttl_hours |
+| Ticket attached | 15% | Incident ID attached correctly |
+| Security flagged | 15% | `audit.flag` was called |
+| Final grant | 20% | Correct decision given incident validity |
+
+### Task 5: SoD Audit
+| Component | Weight | What's Checked |
+|-----------|--------|----------------|
+| Violations found | 30% | Recall of true violations planted in world |
+| False positives | 15% | Precision: didn't flag mediated violations |
+| Correct revocations | 25% | Revoked lower-risk entitlement of conflicting pair |
+| Controls recognized | 10% | Checked for active compensating controls |
+| Report submitted | 20% | `sod.submit_report` was called |
 
 ---
 

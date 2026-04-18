@@ -53,7 +53,7 @@ No dedicated test suite — validation is done via episode generation, baseline 
 
 - **`pipeline/episode_generator.py`** — Procedurally generates deterministic episodes from a seed: builds org chart, resources, policies, entitlements (with risky/stale grants for Task 3), groups, approval chains, and workflows
 
-- **`pipeline/task_templates.py`** — Defines the 3 task families with entity counts, subgoals, and grading weights
+- **`pipeline/task_templates.py`** — Defines the 5 task families with entity counts, subgoals, and grading weights
 
 - **`server/app.py`** — FastAPI app with stateful singleton `WorldState`. Key endpoints: `POST /reset`, `POST /step`, `GET /state`, `GET /schema`, `GET /tasks`, `POST /grader`, `POST /baseline`
 
@@ -63,6 +63,8 @@ No dedicated test suite — validation is done via episode generation, baseline 
   - Task 1 `access_decision`: 40% decision correctness, 25% role, 20% TTL, 15% justification
   - Task 2 `jit_escalation`: 20% approvers, 15% order, 15% ticket, 15% role, 15% TTL, 20% final decision
   - Task 3 `access_review`: 30% precision, 30% recall, 20% workflow preservation, 10% compliance, 10% submission
+  - Task 4 `emergency_breakglass`: 15% incident verify, 15% role, 20% TTL, 15% ticket, 15% flag, 20% final grant
+  - Task 5 `separation_of_duties_audit`: 30% violations found, 15% false positives, 25% revocations, 10% controls, 20% report
 
 - **`reward/aggregator.py`** — Per-step reward signals (base rewards per tool type, bonuses for correct identification/revocation, penalties for errors/redundancy, floor 0.01)
 
@@ -72,7 +74,7 @@ No dedicated test suite — validation is done via episode generation, baseline 
 
 - **`inference.py`** — Baseline LLM agent using OpenAI-compatible API; emits structured stdout logs for hackathon judge
 
-### 19 Agent Tools (organized by domain)
+### 27 Agent Tools (organized by domain)
 
 Policy, Org, Request, Approval, Access, Entitlement, Audit, Group, Workflow, Review — all invoked via `POST /step` with `{"tool_name": "...", "arguments": {...}}`.
 

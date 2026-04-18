@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from .task_templates import get_task
+from .task_templates import get_task, TASK_GOAL_VARIANTS
 
 # ── Name pools ───────────────────────────────────────────────────────────────
 
@@ -221,7 +221,9 @@ class EpisodeGenerator:
             "seed": seed,
             "task_id": task_id,
             "difficulty_level": difficulty_level,
-            "task_goal": template["task_goal"].format(review_target_user_id=review_target_user_id) if task_id == "access_review" else template["task_goal"],
+            "task_goal": content_rng.choice(TASK_GOAL_VARIANTS[task_id]).format(
+                review_target_user_id=review_target_user_id
+            ) if task_id == "access_review" else content_rng.choice(TASK_GOAL_VARIANTS[task_id]),
             "max_steps": scaled_max_steps,
             "available_tools": template["available_tools"],
             "current_time": datetime(2024, 4, 8, 9, 0, 0).isoformat(),

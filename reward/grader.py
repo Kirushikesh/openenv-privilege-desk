@@ -2,26 +2,17 @@
 Task-specific graders for PrivilegeDesk.
 
 Each grader receives the full world_state (including hidden_state) and
-returns a score breakdown dict with a 'score' key in (0.0, 1.0) — STRICTLY.
+returns a score breakdown dict with a 'score' key in [0.0, 1.0].
 
-Phase 2 hackathon requirement: scores must be in open interval (0, 1).
-All graders clamp final output to [0.01, 0.99].
+No clamping is applied here — raw weighted sums of [0, 1] sub-scores
+naturally stay in [0.0, 1.0]. The root graders.py applies the Round 1
+hackathon clamp (0.01, 0.99) at the judge boundary.
 """
 from typing import Any, Dict
 
-# Score bounds: strictly between 0 and 1 (hackathon Phase 2 requirement)
-_MIN = 0.01
-_MAX = 0.99
 
-
-def _clamp(score: float) -> float:
-    """Ensure score is strictly in (0, 1) — never exactly 0.0 or 1.0."""
-    return min(max(round(score, 4), 0.01), 0.99)
-
-
-def _clamp_breakdown(scores: dict) -> dict:
-    """Clamp every individual sub-score to strictly (0, 1)."""
-    return {k: _clamp(v) for k, v in scores.items()}
+def _score(value: float) -> float:
+    return round(value, 4)
 
 
 # ── Task 1: Access Decision ───────────────────────────────────────────────────
@@ -58,8 +49,7 @@ def grade_access_decision(world_state: Dict[str, Any]) -> Dict[str, Any]:
     if not decided_req:
         # No decision submitted — partial credit for viewing (policy_compliance baseline)
         details["error"] = "No decision was submitted"
-        scores = _clamp_breakdown(scores)
-        total = _clamp(sum(scores[k] * weights[k] for k in weights))
+        total = _score(sum(scores[k] * weights[k] for k in weights))
         return {"score": total, "breakdown": scores,
                 "weights": weights, "details": details}
 
@@ -69,8 +59,7 @@ def grade_access_decision(world_state: Dict[str, Any]) -> Dict[str, Any]:
 
     if not correct:
         details["error"] = "No correct decision found for this request"
-        scores = _clamp_breakdown(scores)
-        total = _clamp(sum(scores[k] * weights[k] for k in weights))
+        total = _score(sum(scores[k] * weights[k] for k in weights))
         return {"score": total, "breakdown": scores,
                 "weights": weights, "details": details}
 
@@ -109,8 +98,7 @@ def grade_access_decision(world_state: Dict[str, Any]) -> Dict[str, Any]:
         scores["correct_justification"] = 1.0
     details["justification"] = {"agent": agent_just, "correct": correct_just}
 
-    scores = _clamp_breakdown(scores)
-    total = _clamp(sum(scores[k] * weights[k] for k in weights))
+    total = _score(sum(scores[k] * weights[k] for k in weights))
     return {"score": total, "breakdown": scores, "weights": weights, "details": details}
 
 
@@ -143,8 +131,7 @@ def grade_jit_escalation(world_state: Dict[str, Any]) -> Dict[str, Any]:
 
     if not req:
         details["error"] = "No request found"
-        scores = _clamp_breakdown(scores)
-        return {"score": _clamp(0.0), "breakdown": scores,
+        return {"score": 0.0, "breakdown": scores,
                 "weights": weights, "details": details}
 
     req_id = req["request_id"]
@@ -221,8 +208,7 @@ def grade_jit_escalation(world_state: Dict[str, Any]) -> Dict[str, Any]:
         "should_approve": should_approve
     }
 
-    scores = _clamp_breakdown(scores)
-    total = _clamp(sum(scores[k] * weights[k] for k in weights))
+    total = _score(sum(scores[k] * weights[k] for k in weights))
     return {"score": total, "breakdown": scores, "weights": weights, "details": details}
 
 
@@ -318,8 +304,7 @@ def grade_access_review(world_state: Dict[str, Any]) -> Dict[str, Any]:
         scores["review_submitted"] = 1.0
     details["review_submitted"] = review_submitted
 
-    scores = _clamp_breakdown(scores)
-    total = _clamp(sum(scores[k] * weights[k] for k in weights))
+    total = _score(sum(scores[k] * weights[k] for k in weights))
     return {"score": total, "breakdown": scores, "weights": weights, "details": details}
 
 
@@ -350,8 +335,7 @@ def grade_emergency_breakglass(world_state: Dict[str, Any]) -> Dict[str, Any]:
     )
     if not req:
         details["error"] = "No breakglass request found"
-        scores = _clamp_breakdown(scores)
-        return {"score": _clamp(0.0), "breakdown": scores,
+        return {"score": 0.0, "breakdown": scores,
                 "weights": weights, "details": details}
 
     incident_is_valid = correct_bg.get("incident_is_valid", True)
@@ -412,8 +396,7 @@ def grade_emergency_breakglass(world_state: Dict[str, Any]) -> Dict[str, Any]:
         "should_grant": should_grant,
     }
 
-    scores = _clamp_breakdown(scores)
-    total = _clamp(sum(scores[k] * weights[k] for k in weights))
+    total = _score(sum(scores[k] * weights[k] for k in weights))
     return {"score": total, "breakdown": scores, "weights": weights, "details": details}
 
 
@@ -521,8 +504,7 @@ def grade_separation_of_duties_audit(world_state: Dict[str, Any]) -> Dict[str, A
     scores["report_submitted"] = 1.0 if report_submitted else 0.0
     details["report_submitted"] = report_submitted
 
-    scores = _clamp_breakdown(scores)
-    total = _clamp(sum(scores[k] * weights[k] for k in weights))
+    total = _score(sum(scores[k] * weights[k] for k in weights))
     return {"score": total, "breakdown": scores, "weights": weights, "details": details}
 
 
@@ -541,5 +523,5 @@ def grade(world_state: Dict[str, Any]) -> Dict[str, Any]:
     task_id = world_state.get("task_id", "access_decision")
     grader = GRADERS.get(task_id)
     if not grader:
-        return {"score": _clamp(0.0), "error": f"No grader for task_id '{task_id}'"}
+        return {"score": 0.0, "error": f"No grader for task_id '{task_id}'"}
     return grader(world_state)
