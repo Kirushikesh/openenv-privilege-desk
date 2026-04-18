@@ -140,6 +140,35 @@ class EpisodeGenerator:
             users, resources, policies, entitlements, num_requests, rng
         )
 
+        # 6b. SoD data (separation_of_duties_audit only)
+        conflict_matrix: Dict[str, Any] = {}
+        compensating_controls: Dict[str, Any] = {}
+        sod_true_violations: list = []
+        sod_all_violations: list = []
+        if task_id == "separation_of_duties_audit":
+            num_conflicts = scaled_count(*entity_counts.get("sod_conflicts", (3, 6)))
+            num_sod_viol = scaled_count(*entity_counts.get("sod_violations", (2, 6)))
+            num_controls = scaled_count(*entity_counts.get("compensating_controls", (1, 3)))
+            conflict_matrix = self._build_conflict_matrix(resources, num_conflicts, rng)
+            compensating_controls, sod_true_violations, sod_all_violations = (
+                self._build_sod_data(
+                    users, resources, entitlements, conflict_matrix,
+                    num_sod_viol, num_controls, rng, difficulty_level,
+                )
+            )
+
+        # 6d. Incidents (emergency_breakglass only)
+        incidents: Dict[str, Any] = {}
+        if task_id == "emergency_breakglass":
+            num_incidents = scaled_count(*entity_counts.get("incidents", (1, 2)))
+            incidents = self._build_incidents(
+                users, resources, num_incidents, rng, difficulty_level
+            )
+            # Override pending_requests with a single breakglass request
+            pending_requests, correct_decisions = self._build_breakglass_request(
+                incidents, users, resources, policies, rng
+            )
+
         # 7. Approval chains
         approval_chains: Dict[str, Any] = {}
         if "approval_chains" in entity_counts:
@@ -167,6 +196,9 @@ class EpisodeGenerator:
             risky_entitlement_ids=risky_ids,
             workflows=workflows,
             policies=policies,
+            incidents=incidents,
+            sod_true_violations=sod_true_violations,
+            sod_all_violations=sod_all_violations,
             rng=rng,
         )
 
@@ -203,9 +235,16 @@ class EpisodeGenerator:
             "pending_requests": pending_requests,
             "approval_chains": approval_chains,
             "workflows": workflows,
-            "audit_log": [] ,           # starts empty, populated by agent actions
+            "conflict_matrix": conflict_matrix,
+            "compensating_controls": compensating_controls,
+            "audit_log": [],            # starts empty, populated by agent actions
             "audit_db": audit_log,      # pre-existing audit history (queryable via tool)
             "review_target_user_id": review_target_user_id,
+            # Visible incidents (full details hidden until incident.verify is called)
+            "incidents": {
+                inc_id: {k: v for k, v in inc.items() if not k.startswith("_")}
+                for inc_id, inc in incidents.items()
+            },
             # Tracking
             "subgoals": subgoals,
             "completion_state": {
@@ -216,6 +255,13 @@ class EpisodeGenerator:
                 "review_submitted": False,
                 "decision_submitted": False,
                 "grant_activated": False,
+                # break-glass specific
+                "incident_verified": False,
+                "security_flagged": False,
+                # SoD audit specific
+                "sod_violations_identified": [],
+                "sod_controls_checked": [],
+                "sod_report_submitted": False,
             },
             # Ground truth (hidden from agent)
             "hidden_state": hidden_state,
@@ -308,6 +354,10 @@ class EpisodeGenerator:
                 max_ttl = rng.choice([24, 48, 72])
                 requires_approval = []
 
+            # Break-glass fields: emergency TTL cap and whether BG is permitted
+            breakglass_max_ttl = max(1, min(4, max_ttl // 2))
+            breakglass_allowed = rng.random() < 0.80  # 80% of policies allow break-glass
+
             policies[pid] = {
                 "policy_id": pid,
                 "resource_id": res_id,
@@ -316,12 +366,63 @@ class EpisodeGenerator:
                 "max_ttl_hours": max_ttl,
                 "requires_approval_from": requires_approval,
                 "allowed_departments": rng.sample(DEPARTMENTS, rng.randint(1, 4)),
+                "breakglass_max_ttl_hours": breakglass_max_ttl,
+                "breakglass_allowed": breakglass_allowed,
                 "description": (
                     f"Access to {res['name']}: max role={max_role}, "
-                    f"max TTL={max_ttl}h, approvals={requires_approval}"
+                    f"max TTL={max_ttl}h, approvals={requires_approval}, "
+                    f"breakglass_allowed={breakglass_allowed}"
                 ),
             }
         return policies
+
+    def _build_incidents(
+        self, users: Dict, resources: Dict, num_incidents: int,
+        rng: random.Random, difficulty_level: int = 1,
+    ) -> Dict[str, Any]:
+        """Build active/resolved incidents. Hidden fields revealed via incident.verify."""
+        incidents = {}
+        user_ids = list(users.keys())
+        resource_ids = list(resources.keys())
+
+        for i in range(num_incidents):
+            inc_id = f"inc_{i:03d}"
+            resource_id = rng.choice(resource_ids)
+            reporter_id = rng.choice(user_ids)
+            others = [u for u in user_ids if u != reporter_id] or user_ids
+            on_call_id = rng.choice(others)
+            resource = resources.get(resource_id, {})
+
+            if i == 0:
+                # Main incident: valid at level 1/2, possibly invalid at level 3
+                if difficulty_level < 3:
+                    severity = rng.choice(["P1", "P2"])
+                    status = "active"
+                else:
+                    severity = rng.choice(["P1", "P2", "P2", "P3"])
+                    status = rng.choice(["active", "active", "resolved"])
+            else:
+                # Decoy incidents for higher difficulty
+                severity = rng.choice(["P3", "P3", "P2"])
+                status = rng.choice(["resolved", "resolved", "active"])
+
+            created_at = (
+                datetime(2024, 4, 8, 8, 0, 0) - timedelta(hours=rng.randint(0, 3))
+            ).isoformat()
+
+            incidents[inc_id] = {
+                "incident_id": inc_id,
+                "severity": severity,
+                "status": status,
+                "created_at": created_at,
+                "description": f"Production incident on {resource.get('name', resource_id)}",
+                # Hidden until agent calls incident.verify
+                "_on_call_engineer_id": on_call_id,
+                "_affected_resource_id": resource_id,
+                "_reporter_id": reporter_id,
+            }
+
+        return incidents
 
     def _build_entitlements(
         self, users: Dict, resources: Dict, policies: Dict,
@@ -570,9 +671,189 @@ class EpisodeGenerator:
 
         return sorted(entries, key=lambda e: e["timestamp"], reverse=True)
 
+    def _build_breakglass_request(
+        self, incidents: Dict, users: Dict, resources: Dict,
+        policies: Dict, rng: random.Random,
+    ):
+        """Build a single breakglass pending request tied to the main incident."""
+        # Main incident is always inc_000
+        main_inc = incidents.get("inc_000", next(iter(incidents.values())))
+        resource_id = main_inc["_affected_resource_id"]
+        on_call_id = main_inc["_on_call_engineer_id"]
+
+        policy = next(
+            (p for p in policies.values() if p["resource_id"] == resource_id),
+            next(iter(policies.values()), None),
+        )
+        correct_role = policy["max_role"] if policy else "editor"
+        correct_ttl = policy.get("breakglass_max_ttl_hours", 2) if policy else 2
+
+        req_id = "req_000"
+        resource = resources.get(resource_id, {})
+        requests = {
+            req_id: {
+                "request_id": req_id,
+                "requester_id": on_call_id,
+                "resource_id": resource_id,
+                "resource_name": resource.get("name", resource_id),
+                "resource_type": resource.get("type", ""),
+                "requested_role": correct_role,
+                "reason": "Emergency break-glass access for production incident",
+                "ticket_id": main_inc["incident_id"],
+                "status": "pending",
+                "submitted_at": datetime(2024, 4, 8, 8, 55, 0).isoformat(),
+                "applicable_policy_id": policy["policy_id"] if policy else None,
+                "_breakglass": True,
+                "_incident_id": main_inc["incident_id"],
+            }
+        }
+        correct_decisions = {
+            req_id: {
+                "should_approve": (
+                    main_inc["status"] == "active"
+                    and main_inc["severity"] in ("P1", "P2")
+                    and (policy.get("breakglass_allowed", True) if policy else True)
+                ),
+                "correct_role": correct_role,
+                "correct_ttl_hours": correct_ttl,
+            }
+        }
+        return requests, correct_decisions
+
+    def _build_conflict_matrix(self, resources: Dict, num_conflicts: int,
+                               rng: random.Random) -> Dict[str, Any]:
+        """Build SoD conflict matrix — pairs of (resource_type, min_role) that must not co-exist."""
+        resource_types = list(set(r["type"] for r in resources.values()))
+        if len(resource_types) < 2:
+            resource_types = resource_types + resource_types  # allow same-type conflicts
+
+        conflicts = {}
+        for i in range(num_conflicts):
+            cid = f"conflict_{i:03d}"
+            rtype_a = rng.choice(resource_types)
+            rtype_b = rng.choice([t for t in resource_types if t != rtype_a] or resource_types)
+            role_a = rng.choice(["editor", "admin", "owner"])
+            role_b = rng.choice(["editor", "admin", "owner"])
+            conflicts[cid] = {
+                "conflict_id": cid,
+                "name": f"SoD: {rtype_a}/{role_a}+ with {rtype_b}/{role_b}+",
+                "resource_type_a": rtype_a,
+                "min_role_a": role_a,
+                "resource_type_b": rtype_b,
+                "min_role_b": role_b,
+                "severity": rng.choice(["high", "critical"]),
+                "description": (
+                    f"Users must not hold {role_a}+ on {rtype_a} "
+                    f"AND {role_b}+ on {rtype_b} simultaneously"
+                ),
+            }
+        return conflicts
+
+    def _build_sod_data(
+        self, users: Dict, resources: Dict, entitlements: Dict,
+        conflict_matrix: Dict, num_violations: int, num_controls: int,
+        rng: random.Random, difficulty_level: int = 1,
+    ):
+        """Inject SoD-violation entitlements and create compensating controls.
+
+        Modifies `entitlements` in-place by appending violation-causing entries.
+        Returns (compensating_controls, true_violations, all_violations).
+        """
+        now = datetime(2024, 4, 8, 9, 0, 0)
+        user_ids = list(users.keys())
+        conflicts = list(conflict_matrix.values())
+        compensating_controls: Dict[str, Any] = {}
+        all_violations = []
+
+        if not conflicts:
+            return compensating_controls, [], []
+
+        for i in range(num_violations):
+            conflict = conflicts[i % len(conflicts)]
+            cid = conflict["conflict_id"]
+
+            # Find resources of each required type
+            res_a = next((r for r in resources.values()
+                          if r["type"] == conflict["resource_type_a"]), None)
+            res_b = next((r for r in resources.values()
+                          if r["type"] == conflict["resource_type_b"]), None)
+            if not res_a or not res_b:
+                continue
+
+            user_id = user_ids[i % len(user_ids)]
+            grant_time = now - timedelta(days=rng.randint(10, 60))
+            eid_a = f"ent_sod_{i:03d}a"
+            eid_b = f"ent_sod_{i:03d}b"
+
+            for eid, res, min_role in [(eid_a, res_a, conflict["min_role_a"]),
+                                        (eid_b, res_b, conflict["min_role_b"])]:
+                entitlements[eid] = {
+                    "entitlement_id": eid,
+                    "user_id": user_id,
+                    "resource_id": res["resource_id"],
+                    "role": min_role,
+                    "is_temporary": False,
+                    "granted_at": grant_time.isoformat(),
+                    "expires_at": None,
+                    "granted_by": rng.choice(user_ids),
+                    "last_used": (grant_time + timedelta(days=rng.randint(1, 10))).isoformat(),
+                    "days_since_use": rng.randint(5, 30),
+                    "source": "direct",
+                    "_is_risky": False,
+                    "_risky_reason": None,
+                    "_sod_violation": True,
+                    "_conflict_id": cid,
+                }
+
+            all_violations.append({
+                "user_id": user_id,
+                "conflict_id": cid,
+                "entitlement_id_a": eid_a,
+                "entitlement_id_b": eid_b,
+            })
+
+        # Create compensating controls for the first num_controls violations
+        for j in range(min(num_controls, len(all_violations))):
+            v = all_violations[j]
+            ctrl_id = f"ctrl_{j:03d}"
+            # At difficulty 3, ~50% of controls are expired
+            if difficulty_level == 3 and rng.random() < 0.5:
+                expires_at = (now - timedelta(days=rng.randint(1, 30))).isoformat()
+                is_active = False
+            else:
+                expires_at = (now + timedelta(days=rng.randint(30, 180))).isoformat()
+                is_active = True
+            compensating_controls[ctrl_id] = {
+                "control_id": ctrl_id,
+                "user_id": v["user_id"],
+                "conflict_id": v["conflict_id"],
+                "description": rng.choice([
+                    "Enhanced monitoring and alerting in place",
+                    "Quarterly security review by the access governance team",
+                    "Manager approval required for all privileged actions",
+                    "Read-only audit logging enforced with SIEM integration",
+                ]),
+                "expires_at": expires_at,
+                "is_active": is_active,
+            }
+
+        # True violations = violations without any active compensating control
+        mitigated = {
+            (c["user_id"], c["conflict_id"])
+            for c in compensating_controls.values()
+            if c["is_active"]
+        }
+        true_violations = [
+            v for v in all_violations
+            if (v["user_id"], v["conflict_id"]) not in mitigated
+        ]
+
+        return compensating_controls, true_violations, all_violations
+
     def _build_hidden_state(self, task_id, pending_requests, correct_decisions,
                             approval_chains, entitlements, risky_entitlement_ids,
-                            workflows, policies, rng):
+                            workflows, policies, incidents=None,
+                            sod_true_violations=None, sod_all_violations=None, rng=None):
         hidden = {
             "correct_decisions": correct_decisions,
             "correct_approval_chains": {
@@ -588,6 +869,38 @@ class EpisodeGenerator:
                 for eid in wf.get("depends_on_entitlements", [])
             ],
         }
+
+        # Break-glass ground truth
+        if task_id == "emergency_breakglass" and incidents:
+            main_inc = incidents.get("inc_000", next(iter(incidents.values())))
+            req = next(iter(pending_requests.values()), {})
+            policy_id = req.get("applicable_policy_id")
+            policy = policies.get(policy_id, {}) if policy_id else {}
+            correct_d = correct_decisions.get(req.get("request_id", "req_000"), {})
+            hidden["correct_breakglass"] = {
+                "incident_id": main_inc["incident_id"],
+                "on_call_user_id": main_inc["_on_call_engineer_id"],
+                "resource_id": main_inc["_affected_resource_id"],
+                "correct_role": correct_d.get("correct_role", policy.get("max_role", "editor")),
+                "correct_ttl_hours": correct_d.get(
+                    "correct_ttl_hours", policy.get("breakglass_max_ttl_hours", 2)
+                ),
+                "incident_is_valid": (
+                    main_inc["status"] == "active"
+                    and main_inc["severity"] in ("P1", "P2")
+                ),
+                "breakglass_allowed": policy.get("breakglass_allowed", True),
+            }
+
+        # SoD ground truth
+        if task_id == "separation_of_duties_audit" and sod_true_violations is not None:
+            hidden["sod_true_violations"] = sod_true_violations
+            hidden["sod_all_violations"] = sod_all_violations or []
+            # Minimum revocations: entitlement_id_a from each true violation
+            hidden["sod_minimum_revocations"] = [
+                v["entitlement_id_a"] for v in sod_true_violations
+            ]
+
         return hidden
 
 

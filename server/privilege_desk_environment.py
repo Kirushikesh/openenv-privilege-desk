@@ -166,6 +166,9 @@ class PrivilegeDeskEnvironment(Environment[PrivilegeDeskAction, PrivilegeDeskObs
             pending_requests=obs_dict.get("pending_requests", {}),
             approval_chains=obs_dict.get("approval_chains", {}),
             workflows=obs_dict.get("workflows", {}),
+            incidents=obs_dict.get("incidents", {}),
+            conflict_matrix=obs_dict.get("conflict_matrix", {}),
+            compensating_controls=obs_dict.get("compensating_controls", {}),
             # Objectives
             objectives=obs_dict.get("objectives", []),
             audit_log=obs_dict.get("audit_log", []),

@@ -28,6 +28,13 @@ STEP_REWARD_MAP = {
     "access.grant":          0.02,
     "access.set_ttl":        0.02,
     "review.submit":         0.05,
+    # Task 4 & 5 tools
+    "incident.verify":       0.05,
+    "audit.flag":            0.03,
+    "sod.get_conflict_matrix": 0.02,
+    "sod.check_user":        0.05,
+    "sod.get_compensating_controls": 0.03,
+    "sod.submit_report":      0.05,
 }
 
 # Small positive values for bad actions (no negatives — all clamped to (0,1))

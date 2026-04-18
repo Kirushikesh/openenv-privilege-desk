@@ -18,18 +18,22 @@ if _root not in sys.path:
 
 try:
     from reward.grader import (
-        grade_access_decision as _grade_access,
-        grade_jit_escalation  as _grade_jit,
-        grade_access_review   as _grade_review,
+        grade_access_decision    as _grade_access,
+        grade_jit_escalation     as _grade_jit,
+        grade_access_review      as _grade_review,
+        grade_emergency_breakglass as _grade_breakglass,
+        grade_separation_of_duties_audit as _grade_sod,
         _clamp,
     )
 except ImportError:
     # Fallback for running directly from repo root
     sys.path.insert(0, os.path.join(_root, "reward"))
     from grader import (  # type: ignore[no-redef]
-        grade_access_decision as _grade_access,
-        grade_jit_escalation  as _grade_jit,
-        grade_access_review   as _grade_review,
+        grade_access_decision    as _grade_access,
+        grade_jit_escalation     as _grade_jit,
+        grade_access_review      as _grade_review,
+        grade_emergency_breakglass as _grade_breakglass,
+        grade_separation_of_duties_audit as _grade_sod,
         _clamp,
     )
 
@@ -64,13 +68,28 @@ def jit_escalation_grader(trajectory: dict = None) -> float:
 def access_review_grader(trajectory: dict = None) -> float:
     """Grader for task: access_review. Returns float in (0.01, 0.99)."""
     trajectory = trajectory or {}
-    # Extract world_state if it exists in trajectory, otherwise use trajectory itself
     world_state = trajectory.get("world_state", trajectory)
     return _float_score(_grade_review, world_state)
+
+
+def emergency_breakglass_grader(trajectory: dict = None) -> float:
+    """Grader for task: emergency_breakglass. Returns float in (0.01, 0.99)."""
+    trajectory = trajectory or {}
+    world_state = trajectory.get("world_state", trajectory)
+    return _float_score(_grade_breakglass, world_state)
+
+
+def separation_of_duties_audit_grader(trajectory: dict = None) -> float:
+    """Grader for task: separation_of_duties_audit. Returns float in (0.01, 0.99)."""
+    trajectory = trajectory or {}
+    world_state = trajectory.get("world_state", trajectory)
+    return _float_score(_grade_sod, world_state)
 
 
 __all__ = [
     "access_decision_grader",
     "jit_escalation_grader",
     "access_review_grader",
+    "emergency_breakglass_grader",
+    "separation_of_duties_audit_grader",
 ]

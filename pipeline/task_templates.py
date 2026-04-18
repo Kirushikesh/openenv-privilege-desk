@@ -98,6 +98,102 @@ TASK_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
     },
 
+    # ── Task 4: Emergency Break-Glass (Medium) ───────────────────────────────
+    "emergency_breakglass": {
+        "task_id": "emergency_breakglass",
+        "difficulty": "medium",
+        "task_goal": (
+            "A production incident has been reported. An on-call engineer needs "
+            "emergency elevated access via the break-glass procedure. Verify the "
+            "incident is active and valid, check the engineer's current access, "
+            "look up the break-glass policy for the affected resource, attach the "
+            "incident ticket, flag the security team, set the correct TTL, and "
+            "activate the emergency grant. If the incident is invalid or break-glass "
+            "is not allowed for the resource, do NOT grant access."
+        ),
+        "max_steps": 10,
+        "available_tools": [
+            "incident.verify",
+            "policy.lookup", "policy.list",
+            "org.get_user",
+            "entitlement.list",
+            "ticket.attach",
+            "access.grant", "access.set_ttl", "access.deny",
+            "audit.flag",
+        ],
+        "required_entities": {
+            "users": (5, 10),
+            "resources": (3, 8),
+            "policies": (3, 8),
+            "pending_requests": (1, 1),
+            "entitlements": (5, 12),
+            "incidents": (1, 2),
+        },
+        "subgoals": [
+            {"id": "sg_verify_incident",  "description": "Verify the incident is active and valid",            "reward": 0.10},
+            {"id": "sg_check_engineer",   "description": "Check the on-call engineer's clearance",             "reward": 0.05},
+            {"id": "sg_lookup_policy",    "description": "Look up the break-glass policy for the resource",    "reward": 0.10},
+            {"id": "sg_attach_ticket",    "description": "Attach the incident ticket to the grant record",     "reward": 0.10},
+            {"id": "sg_flag_security",    "description": "Flag the security team about the emergency override","reward": 0.15},
+            {"id": "sg_set_ttl",          "description": "Set correct TTL (within break-glass limit)",         "reward": 0.10},
+            {"id": "sg_activate_grant",   "description": "Activate the emergency access grant",                "reward": 0.40},
+        ],
+        "grading_weights": {
+            "incident_valid":      0.15,
+            "correct_role":        0.15,
+            "correct_ttl":         0.20,
+            "ticket_attached":     0.15,
+            "security_flagged":    0.15,
+            "correct_final_grant": 0.20,
+        },
+    },
+
+    # ── Task 5: Separation of Duties Audit (Hard) ───────────────────────────
+    "separation_of_duties_audit": {
+        "task_id": "separation_of_duties_audit",
+        "difficulty": "hard",
+        "task_goal": (
+            "Conduct a Separation of Duties (SoD) audit across the organization. "
+            "Retrieve the SoD conflict matrix to understand which role combinations "
+            "are forbidden. Check each user for SoD violations (conflicting entitlement "
+            "pairs). For each potential violation, check whether an active compensating "
+            "control exists before flagging it. Revoke the minimum set of entitlements "
+            "needed to resolve unmitigated violations, while preserving access backed by "
+            "active compensating controls. Submit your audit report when complete."
+        ),
+        "max_steps": 25,
+        "available_tools": [
+            "org.list_users", "org.get_user",
+            "entitlement.list", "entitlement.inspect", "entitlement.revoke",
+            "sod.get_conflict_matrix", "sod.check_user",
+            "sod.get_compensating_controls", "sod.submit_report",
+        ],
+        "required_entities": {
+            "users": (6, 15),
+            "resources": (4, 10),
+            "policies": (3, 8),
+            "entitlements": (10, 25),
+            "sod_conflicts": (3, 6),
+            "sod_violations": (2, 6),
+            "compensating_controls": (1, 3),
+        },
+        "subgoals": [
+            {"id": "sg_get_conflicts",    "description": "Retrieve the SoD conflict matrix",                   "reward": 0.05},
+            {"id": "sg_list_users",       "description": "List users to audit",                                "reward": 0.05},
+            {"id": "sg_check_violations", "description": "Check users for SoD violations",                    "reward": 0.20},
+            {"id": "sg_check_controls",   "description": "Check compensating controls on potential violations","reward": 0.10},
+            {"id": "sg_revoke_correctly", "description": "Revoke entitlements for unmitigated violations",     "reward": 0.20},
+            {"id": "sg_submit_report",    "description": "Submit the completed SoD audit report",             "reward": 0.40},
+        ],
+        "grading_weights": {
+            "violations_found":        0.30,
+            "false_positives":         0.15,
+            "correct_revocations":     0.25,
+            "compensating_recognized": 0.10,
+            "report_submitted":        0.20,
+        },
+    },
+
     # ── Task 3: Access Review (Hard) ─────────────────────────────────────────
     "access_review": {
         "task_id": "access_review",

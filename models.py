@@ -46,6 +46,11 @@ class PrivilegeDeskObservation(Observation):
     approval_chains: Dict[str, Any] = Field(default_factory=dict, description="Approval chain state")
     workflows: Dict[str, Any] = Field(default_factory=dict, description="Active workflows")
 
+    # Task-specific entities
+    incidents: Dict[str, Any] = Field(default_factory=dict, description="Production incidents (Task 4)")
+    conflict_matrix: Dict[str, Any] = Field(default_factory=dict, description="SoD conflict matrix (Task 5)")
+    compensating_controls: Dict[str, Any] = Field(default_factory=dict, description="SoD compensating controls (Task 5)")
+
     # Objectives & last action
     objectives: List[Dict[str, Any]] = Field(default_factory=list, description="Task subgoals")
     audit_log: List[Dict[str, Any]] = Field(default_factory=list, description="Last 5 actions taken")
