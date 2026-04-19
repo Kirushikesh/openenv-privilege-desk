@@ -157,5 +157,5 @@ hackathon_docs/
 .gemini/
 my_notes/
 competitor_research/
-training/*.txt
+# training/*.txt
 outputs/grpo_*/
