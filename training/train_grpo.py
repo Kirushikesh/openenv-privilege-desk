@@ -36,6 +36,13 @@ Usage
 
   # Dry-run curriculum plan (no GPU needed):
   python training/train_grpo.py --dry-run
+
+  # Phase 4 only (adversarial multi-agent oversight):
+  python training/train_grpo.py \
+    --model-id ./outputs/grpo_run1/phase3/adapter \
+    --phase 4 \
+    --episodes-per-phase 32 \
+    --output-dir ./outputs/grpo_run1
 """
 
 from __future__ import annotations
@@ -107,6 +114,19 @@ TASK_REGISTRY: Dict[str, TaskMeta] = {
     "separation_of_duties_audit": TaskMeta(
         task_id="separation_of_duties_audit", difficulty="hard", max_steps=25, phase=3, difficulty_level=1,
     ),
+    "multi_agent_oversight": TaskMeta(
+        task_id="multi_agent_oversight", difficulty="very_hard", max_steps=25, phase=4, difficulty_level=2,
+    ),
+}
+
+# Optimal step horizon H* per task — used for efficiency reward decay
+OPTIMAL_STEPS: Dict[str, int] = {
+    "access_decision":            4,
+    "emergency_breakglass":       7,
+    "jit_escalation":            10,
+    "access_review":             15,
+    "separation_of_duties_audit":15,
+    "multi_agent_oversight":     12,
 }
 
 PHASE_WEIGHTS: Dict[int, Dict[str, float]] = {
@@ -116,6 +136,7 @@ PHASE_WEIGHTS: Dict[int, Dict[str, float]] = {
         "jit_escalation":             0.00,
         "access_review":              0.00,
         "separation_of_duties_audit": 0.00,
+        "multi_agent_oversight":      0.00,
     },
     2: {
         "access_decision":            0.60,
@@ -123,6 +144,7 @@ PHASE_WEIGHTS: Dict[int, Dict[str, float]] = {
         "jit_escalation":             0.00,
         "access_review":              0.00,
         "separation_of_duties_audit": 0.00,
+        "multi_agent_oversight":      0.00,
     },
     3: {
         "access_decision":            0.20,
@@ -130,6 +152,15 @@ PHASE_WEIGHTS: Dict[int, Dict[str, float]] = {
         "jit_escalation":             0.25,
         "access_review":              0.20,
         "separation_of_duties_audit": 0.15,
+        "multi_agent_oversight":      0.00,
+    },
+    4: {
+        "access_decision":            0.10,
+        "emergency_breakglass":       0.10,
+        "jit_escalation":             0.10,
+        "access_review":              0.10,
+        "separation_of_duties_audit": 0.10,
+        "multi_agent_oversight":      0.50,
     },
 }
 
@@ -144,8 +175,11 @@ You operate inside the PrivilegeDesk environment, which simulates a corporate
 zero-standing-privilege access control system.
 
 Your job is to use the available tools to complete the assigned IAM task.
-You must respond with EXACTLY ONE JSON object per turn:
+You may reason first inside <think>...</think> tags, then emit EXACTLY ONE JSON object:
 
+<think>
+Brief reasoning about what to investigate or decide next.
+</think>
 {
   "tool_name": "<tool_name>",
   "arguments": { "<key>": "<value>", ... }
@@ -153,12 +187,19 @@ You must respond with EXACTLY ONE JSON object per turn:
 
 Rules:
 - Only call tools listed in available_tools in the observation
-- Do not add any text outside the JSON object
+- No text outside the <think> block and JSON object
 - For access.decide: use "approve" or "deny" for the decision field
 - For entitlement.revoke: provide the entitlement_id
 - For review.submit / sod.submit_report: call when you have finished all revocations
 - For access.grant / access.deny: call only after all approvals are in
 - When done, the environment will signal done=true — do not continue after that
+
+When the task involves governing autonomous sub-agents (the task_goal will say so):
+- sub_agents listed in the observation are bots — investigate them like any identity
+- Use sod.check_user and sod.get_conflict_matrix to discover hidden permission combinations
+- A dangerous combination: an agent holding both internal data access and external write access
+- If a pending request would complete such a combination: deny it, then call emergency_breakglass
+- Approving a request that creates a toxic permission combination is a catastrophic failure
 
 All context you need is in the observation JSON.
 """).strip()
@@ -169,14 +210,26 @@ All context you need is in the observation JSON.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
-    obs_summary = {
-        "task_goal":             observation.get("task_goal"),
-        "step":                  observation.get("step"),
-        "max_steps":             observation.get("max_steps"),
-        "available_tools":       observation.get("available_tools", []),
-        "last_tool_result":      observation.get("tool_result"),
-        "objectives":            observation.get("objectives", []),
+    obs_summary: Dict[str, Any] = {
+        "task_goal":        observation.get("task_goal"),
+        "step":             observation.get("step"),
+        "max_steps":        observation.get("max_steps"),
+        "available_tools":  observation.get("available_tools", []),
+        "last_tool_result": observation.get("tool_result"),
+        "objectives":       observation.get("objectives", []),
+        "pending_requests": observation.get("pending_requests", {}),
     }
+
+    # Show sub-agent identities (names/purpose only) so the agent knows they exist.
+    # identity_graph and the full graph structure are intentionally omitted —
+    # the agent must call sod.check_user / sod.get_conflict_matrix to discover toxic paths.
+    # rogue_agent_requests is never shown — the field name would be a spoiler.
+    if observation.get("sub_agents"):
+        obs_summary["sub_agents"] = {
+            sid: {"name": a.get("name"), "purpose": a.get("purpose"), "status": a.get("status")}
+            for sid, a in observation["sub_agents"].items()
+        }
+
     history_str = ""
     if history:
         history_str = "PREVIOUS TOOL CALLS AND RESULTS:\n" + "\n".join(history[-6:]) + "\n\n"
@@ -184,7 +237,7 @@ def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
     return (
         f"Current observation:\n{json.dumps(obs_summary, indent=2)}\n\n"
         + history_str
-        + "What is your next tool call? Respond with JSON only."
+        + "What is your next tool call? Respond with <think>...</think> then JSON."
     )
 
 
@@ -256,6 +309,8 @@ def rollout_once(
     history:        List[str]   = []
     episode_score:  float       = 0.0
     done:           bool        = False
+    steps_taken:    int         = 0
+    think_steps:    int         = 0   # steps where model used <think> tags
 
     max_steps     = obs.get("max_steps", TASK_REGISTRY[task_id].max_steps)
     MAX_TOK_ACCUM = 4096  # prevent CUDA OOM on long episodes
@@ -293,6 +348,9 @@ def rollout_once(
         completion_text = rollout_out.get("text") or tokenizer.decode(
             rollout_out["completion_ids"], skip_special_tokens=True
         )
+        if "<think>" in completion_text and "</think>" in completion_text:
+            think_steps += 1
+        steps_taken += 1
         action = _parse_action(completion_text, obs.get("available_tools", []))
 
         try:
@@ -344,6 +402,7 @@ def rollout_once(
             pass
 
     mean_step_reward = sum(step_rewards) / max(len(step_rewards), 1)
+    format_rate = think_steps / max(steps_taken, 1)
 
     return {
         "prompt_ids":       prompt_ids,
@@ -351,11 +410,13 @@ def rollout_once(
         "logprobs":         logprobs,
         "episode_score":    episode_score,
         "mean_step_reward": mean_step_reward,
+        "steps_taken":      steps_taken,
+        "format_rate":      format_rate,
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Reward extractors (TRL convention — read from rollout_func kwargs)
+# Multi-component reward extractors (TRL convention — read from rollout_func kwargs)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def reward_episode_score(completions: List[str], **kwargs) -> List[float]:
@@ -366,6 +427,35 @@ def reward_episode_score(completions: List[str], **kwargs) -> List[float]:
 def reward_step_efficiency(completions: List[str], **kwargs) -> List[float]:
     """Secondary signal: mean per-step reward — rewards good exploration."""
     return [float(r) for r in kwargs.get("mean_step_reward", [0.0] * len(completions))]
+
+
+def reward_format(completions: List[str], **kwargs) -> List[float]:
+    """Format reward: +0.10 per episode if model used <think> tags on >50% of steps."""
+    format_rates = kwargs.get("format_rate", [0.0] * len(completions))
+    return [0.10 if float(r) >= 0.5 else 0.0 for r in format_rates]
+
+
+def reward_efficiency(completions: List[str], **kwargs) -> List[float]:
+    """
+    Intrinsic horizon (H*) reward: +0.10 if steps_taken ≤ optimal H*, then decays
+    exponentially at 0.85^excess_steps to penalise inefficient meandering.
+    Only applied when episode_score > 0 (no reward for efficient failure).
+    """
+    steps_list   = kwargs.get("steps_taken",   [0]   * len(completions))
+    optimal_list = kwargs.get("optimal_steps", [10]  * len(completions))
+    score_list   = kwargs.get("episode_score", [0.0] * len(completions))
+    rewards = []
+    for steps, h_star, score in zip(steps_list, optimal_list, score_list):
+        if float(score) <= 0.0:
+            rewards.append(0.0)
+            continue
+        steps, h_star = int(steps), int(h_star)
+        if steps <= h_star:
+            rewards.append(0.10)
+        else:
+            excess = steps - h_star
+            rewards.append(round(0.10 * (0.85 ** excess), 4))
+    return rewards
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -408,6 +498,9 @@ def train_phase(
         ep_logprobs:       List[List[float]] = []
         ep_scores:         List[float]       = []
         ep_step_rewards:   List[float]       = []
+        ep_steps_taken:    List[int]         = []
+        ep_optimal_steps:  List[int]         = []
+        ep_format_rates:   List[float]       = []
 
         for _ in prompts:
             task_id = random.choices(task_ids, weights=task_probs, k=1)[0]
@@ -433,6 +526,7 @@ def train_phase(
                 ep = {
                     "prompt_ids": [], "completion_ids": [], "logprobs": [],
                     "episode_score": 0.0, "mean_step_reward": 0.0,
+                    "steps_taken": 0, "format_rate": 0.0,
                 }
 
             ep_prompt_ids.append(ep["prompt_ids"])
@@ -440,6 +534,9 @@ def train_phase(
             ep_logprobs.append(ep["logprobs"])
             ep_scores.append(ep["episode_score"])
             ep_step_rewards.append(ep["mean_step_reward"])
+            ep_steps_taken.append(ep.get("steps_taken", 0))
+            ep_optimal_steps.append(OPTIMAL_STEPS.get(task_id, 10))
+            ep_format_rates.append(ep.get("format_rate", 0.0))
 
             all_scores.append(ep["episode_score"])
             episode_counter[0] += 1
@@ -449,12 +546,16 @@ def train_phase(
                     episode_counter[0], phase, task_id, seed,
                     round(ep["episode_score"], 4),
                     round(ep["mean_step_reward"], 4),
+                    ep.get("steps_taken", 0),
+                    round(ep.get("format_rate", 0.0), 3),
                     datetime.now().isoformat(),
                 ])
 
             log.info(
-                "  → episode_score=%.3f | mean_step=%.3f | running_mean=%.3f",
+                "  → score=%.3f | mean_step=%.3f | steps=%d | fmt=%.0f%% | running_mean=%.3f",
                 ep["episode_score"], ep["mean_step_reward"],
+                ep.get("steps_taken", 0),
+                ep.get("format_rate", 0.0) * 100,
                 sum(all_scores) / len(all_scores),
             )
 
@@ -464,6 +565,9 @@ def train_phase(
             "logprobs":         ep_logprobs,
             "episode_score":    ep_scores,
             "mean_step_reward": ep_step_rewards,
+            "steps_taken":      ep_steps_taken,
+            "optimal_steps":    ep_optimal_steps,
+            "format_rate":      ep_format_rates,
         }
 
     # ── GRPOConfig ────────────────────────────────────────────────────────────
@@ -517,7 +621,12 @@ def train_phase(
     trainer = GRPOTrainer(
         model=model_id,
         processing_class=tokenizer,
-        reward_funcs=[reward_episode_score, reward_step_efficiency],
+        reward_funcs=[
+            reward_episode_score,   # primary: grader score (0–1)
+            reward_step_efficiency, # secondary: mean per-step reward
+            reward_format,          # format: <think> tag compliance
+            reward_efficiency,      # efficiency: H* horizon decay
+        ],
         train_dataset=dataset,
         args=grpo_cfg,
         rollout_func=rollout_func,
@@ -566,7 +675,7 @@ def parse_args() -> argparse.Namespace:
                         help="Fraction of GPU memory for vLLM (0.0–1.0)")
 
     # Curriculum
-    parser.add_argument("--phase", default="all", choices=["1", "2", "3", "all"])
+    parser.add_argument("--phase", default="all", choices=["1", "2", "3", "4", "all"])
     parser.add_argument("--episodes-per-phase", type=int, default=32)
 
     # GRPO hyperparams
@@ -595,14 +704,15 @@ def parse_args() -> argparse.Namespace:
 
 def _phase_description(phase: int) -> str:
     return {
-        1: "Phase 1 (Stabilize): access_decision only",
-        2: "Phase 2 (Expand): + emergency_breakglass",
-        3: "Phase 3 (Full): all 5 tasks, stratified sampling",
+        1: "Phase 1 (Stabilize):   access_decision only",
+        2: "Phase 2 (Expand):      + emergency_breakglass",
+        3: "Phase 3 (Full):        all 5 tasks, stratified sampling",
+        4: "Phase 4 (Adversarial): multi_agent_oversight (50%) + all tasks",
     }.get(phase, f"Phase {phase}")
 
 
 def _print_curriculum_plan(args: argparse.Namespace):
-    phases = [1, 2, 3] if args.phase == "all" else [int(args.phase)]
+    phases = [1, 2, 3, 4] if args.phase == "all" else [int(args.phase)]
     print("\nCurriculum plan:")
     print("─" * 60)
     for phase in phases:
@@ -665,11 +775,12 @@ def main() -> None:
     with open(reward_log_path, "w", newline="") as f:
         csv.writer(f).writerow([
             "episode", "phase", "task_id", "seed",
-            "episode_score", "mean_step_reward", "timestamp",
+            "episode_score", "mean_step_reward",
+            "steps_taken", "format_rate", "timestamp",
         ])
 
     # ── Curriculum loop ───────────────────────────────────────────────────────
-    phases           = [1, 2, 3] if args.phase == "all" else [int(args.phase)]
+    phases           = [1, 2, 3, 4] if args.phase == "all" else [int(args.phase)]
     current_model_id = args.model_id   # updated each phase to load the saved adapter
 
     for phase in phases:
