@@ -264,7 +264,7 @@ def rollout_once(
 
     prompt_ids:     List[int]   = []
     completion_ids: List[int]   = []
-    logprobs:       List[float] = []
+    logprobs:       List = []   # List[Tuple[float,...]] — wrapped for TRL compatibility
     step_rewards:   List[float] = []
     history:        List[str]   = []
     episode_score:  float       = 0.0
@@ -295,7 +295,13 @@ def rollout_once(
 
         prompt_ids.extend(rollout_out["prompt_ids"])
         completion_ids.extend(rollout_out["completion_ids"])
-        logprobs.extend(rollout_out["logprobs"])
+        # TRL expects logprobs as List[Tuple[float,...]] so lp[0] yields the float.
+        # generate_rollout_completions may return plain floats — wrap if needed.
+        raw_lps = rollout_out.get("logprobs") or []
+        if raw_lps and isinstance(raw_lps[0], (int, float)):
+            logprobs.extend([(float(lp),) for lp in raw_lps])
+        else:
+            logprobs.extend(raw_lps)
 
         completion_text = rollout_out.get("text") or tokenizer.decode(
             rollout_out["completion_ids"], skip_special_tokens=True
