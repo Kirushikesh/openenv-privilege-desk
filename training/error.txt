@@ -1,85 +1,0 @@
-  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
-                                 Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100    20  100    20    0     0    392      0 --:--:-- --:--:-- --:--:--   400
-[2026-04-19 02:38:13] INFO train_grpo.py:628: ============================================================
-[2026-04-19 02:38:13] INFO train_grpo.py:629: PrivilegeDesk GRPO Curriculum Training
-[2026-04-19 02:38:13] INFO train_grpo.py:630:   model          : Qwen/Qwen3-1.7B
-[2026-04-19 02:38:13] INFO train_grpo.py:631:   lora_rank      : 16  alpha=32
-[2026-04-19 02:38:13] INFO train_grpo.py:632:   phase(s)       : all
-[2026-04-19 02:38:13] INFO train_grpo.py:633:   episodes/phase : 32
-[2026-04-19 02:38:13] INFO train_grpo.py:634:   num_generations: 8
-[2026-04-19 02:38:13] INFO train_grpo.py:635:   use_vllm       : True  mode=colocate
-[2026-04-19 02:38:13] INFO train_grpo.py:637:   report_to      : tensorboard
-[2026-04-19 02:38:13] INFO train_grpo.py:638:   output_dir     : ./outputs/grpo_run1
-[2026-04-19 02:38:13] INFO train_grpo.py:639: ============================================================
-[2026-04-19 02:38:17] INFO train_grpo.py:673: 
-────────────────────────────────────────────────────────────
-[2026-04-19 02:38:17] INFO train_grpo.py:674: Phase 1 (Stabilize): access_decision only
-[2026-04-19 02:38:17] INFO train_grpo.py:675: ────────────────────────────────────────────────────────────
-Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files:  50%|█████     | 1/2 [00:07<00:07,  7.95s/it]Fetching 2 files: 100%|██████████| 2/2 [00:07<00:00,  3.98s/it]
-[2026-04-19 02:38:28] INFO modeling.py:987: We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
-Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]Loading checkpoint shards:  50%|█████     | 1/2 [00:10<00:10, 10.26s/it]Loading checkpoint shards: 100%|██████████| 2/2 [00:12<00:00,  5.36s/it]Loading checkpoint shards: 100%|██████████| 2/2 [00:12<00:00,  6.09s/it]
-The model is already on multiple devices. Skipping the move to device specified in `args`.
-Loading safetensors checkpoint shards:   0% Completed | 0/2 [00:00<?, ?it/s]
-Loading safetensors checkpoint shards:  50% Completed | 1/2 [00:00<00:00,  8.22it/s]
-Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:11<00:00,  6.94s/it]
-Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:11<00:00,  5.92s/it]
-
-Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/5 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  20%|██        | 1/5 [00:00<00:00,  6.54it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  60%|██████    | 3/5 [00:00<00:00, 11.51it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 5/5 [00:01<00:00,  3.61it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 5/5 [00:01<00:00,  4.18it/s]
-Capturing CUDA graphs (decode, FULL):   0%|          | 0/4 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):  25%|██▌       | 1/4 [00:00<00:01,  1.76it/s]Capturing CUDA graphs (decode, FULL):  50%|█████     | 2/4 [00:00<00:00,  2.10it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 4/4 [00:01<00:00,  3.85it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 4/4 [00:01<00:00,  3.21it/s]
-[2026-04-19 02:44:14] INFO train_grpo.py:524: Starting GRPO Phase 1 — 32 episodes | tasks=['access_decision']
-The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'bos_token_id': None, 'pad_token_id': 151643}.
-  0%|          | 0/96 [00:00<?, ?it/s][2026-04-19 02:44:15] INFO train_grpo.py:414: Phase 1 | Episode 1 | task=access_decision | seed=53719
-[2026-04-19 02:44:48] INFO train_grpo.py:452:   → episode_score=0.100 | mean_step=0.100 | running_mean=0.100
-[2026-04-19 02:44:48] INFO train_grpo.py:414: Phase 1 | Episode 2 | task=access_decision | seed=53816
-[2026-04-19 02:44:48] INFO train_grpo.py:452:   → episode_score=0.100 | mean_step=0.100 | running_mean=0.100
-[2026-04-19 02:44:48] INFO train_grpo.py:414: Phase 1 | Episode 3 | task=access_decision | seed=53913
-[2026-04-19 02:44:49] INFO train_grpo.py:452:   → episode_score=0.100 | mean_step=0.100 | running_mean=0.100
-[2026-04-19 02:44:49] INFO train_grpo.py:414: Phase 1 | Episode 4 | task=access_decision | seed=54010
-[2026-04-19 02:44:50] INFO train_grpo.py:452:   → episode_score=0.100 | mean_step=0.100 | running_mean=0.100
-[2026-04-19 02:44:50] INFO train_grpo.py:414: Phase 1 | Episode 5 | task=access_decision | seed=54107
-[2026-04-19 02:44:51] INFO train_grpo.py:452:   → episode_score=0.100 | mean_step=0.100 | running_mean=0.100
-[2026-04-19 02:44:51] INFO train_grpo.py:414: Phase 1 | Episode 6 | task=access_decision | seed=54204
-[2026-04-19 02:44:52] INFO train_grpo.py:452:   → episode_score=0.100 | mean_step=0.100 | running_mean=0.100
-[2026-04-19 02:44:52] INFO train_grpo.py:414: Phase 1 | Episode 7 | task=access_decision | seed=54301
-[2026-04-19 02:44:53] INFO train_grpo.py:452:   → episode_score=0.100 | mean_step=0.100 | running_mean=0.100
-[2026-04-19 02:44:53] INFO train_grpo.py:414: Phase 1 | Episode 8 | task=access_decision | seed=54398
-[2026-04-19 02:44:54] INFO train_grpo.py:452:   → episode_score=0.100 | mean_step=0.100 | running_mean=0.100
-[rank0]: Traceback (most recent call last):
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/training/train_grpo.py", line 695, in <module>
-[rank0]:     main()
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/training/train_grpo.py", line 677, in main
-[rank0]:     current_model_id = train_phase(
-[rank0]:                        ^^^^^^^^^^^^
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/training/train_grpo.py", line 528, in train_phase
-[rank0]:     trainer.train()
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/.venv/lib/python3.12/site-packages/transformers/trainer.py", line 2325, in train
-[rank0]:     return inner_training_loop(
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/.venv/lib/python3.12/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
-[rank0]:     tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
-[rank0]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/.venv/lib/python3.12/site-packages/trl/trainer/grpo_trainer.py", line 1094, in training_step
-[rank0]:     output = super().training_step(model, inputs, num_items_in_batch)
-[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/.venv/lib/python3.12/site-packages/transformers/trainer.py", line 4014, in training_step
-[rank0]:     inputs = self._prepare_inputs(inputs)
-[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/.venv/lib/python3.12/site-packages/trl/extras/profiling.py", line 202, in wrapper
-[rank0]:     return func(self, *args, **kwargs)
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/.venv/lib/python3.12/site-packages/trl/trainer/grpo_trainer.py", line 1123, in _prepare_inputs
-[rank0]:     generation_batch = self._generate_and_score_completions(generation_batch)
-[rank0]:                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/.venv/lib/python3.12/site-packages/trl/trainer/grpo_trainer.py", line 1643, in _generate_and_score_completions
-[rank0]:     ) = self._generate(prompts)
-[rank0]:         ^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/.venv/lib/python3.12/site-packages/trl/trainer/grpo_trainer.py", line 1509, in _generate
-[rank0]:     prompt_ids, completion_ids, logprobs, extra_fields = self._generate_single_turn(prompts)
-[rank0]:                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/dccstor/kirushikesh/personal-projects/openenv-privilege-desk/.venv/lib/python3.12/site-packages/trl/trainer/grpo_trainer.py", line 1237, in _generate_single_turn
-[rank0]:     logprobs = [[lp[0] for lp in seq] for seq in logprobs]
-[rank0]:                  ~~^^^
-[rank0]: TypeError: 'float' object is not subscriptable
-[rank0]:[W419 02:44:55.194808170 ProcessGroupNCCL.cpp:1524] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
-[rank0]:[W419 02:44:56.628768056 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())
