@@ -51,6 +51,11 @@ class PrivilegeDeskObservation(Observation):
     conflict_matrix: Dict[str, Any] = Field(default_factory=dict, description="SoD conflict matrix (Task 5)")
     compensating_controls: Dict[str, Any] = Field(default_factory=dict, description="SoD compensating controls (Task 5)")
 
+    # Multi-agent oversight fields (Task 6)
+    sub_agents: Dict[str, Any] = Field(default_factory=dict, description="Autonomous sub-agent identities (Task 6)")
+    identity_graph: Dict[str, Any] = Field(default_factory=dict, description="Sanitized identity DAG — nodes and edges (Task 6)")
+    rogue_agent_requests: Dict[str, Any] = Field(default_factory=dict, description="Pending requests from the rogue sub-agent (Task 6)")
+
     # Objectives & last action
     objectives: List[Dict[str, Any]] = Field(default_factory=list, description="Task subgoals")
     audit_log: List[Dict[str, Any]] = Field(default_factory=list, description="Last 5 actions taken")

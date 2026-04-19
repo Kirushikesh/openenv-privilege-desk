@@ -169,6 +169,13 @@ class PrivilegeDeskEnvironment(Environment[PrivilegeDeskAction, PrivilegeDeskObs
             incidents=obs_dict.get("incidents", {}),
             conflict_matrix=obs_dict.get("conflict_matrix", {}),
             compensating_controls=obs_dict.get("compensating_controls", {}),
+            # Multi-agent oversight fields
+            sub_agents=obs_dict.get("sub_agents", {}),
+            identity_graph=obs_dict.get("identity_graph", {}),
+            rogue_agent_requests={
+                req_id: {k: v for k, v in req.items() if not k.startswith("_")}
+                for req_id, req in obs_dict.get("rogue_agent_requests", {}).items()
+            },
             # Objectives
             objectives=obs_dict.get("objectives", []),
             audit_log=obs_dict.get("audit_log", []),

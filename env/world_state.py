@@ -156,13 +156,26 @@ class WorldState:
             "entitlements": {eid: {k: v for k, v in e.items() if not k.startswith("_")}
                              for eid, e in raw.get("entitlements", {}).items()
                              if e.get("status") != "revoked"},
-            "pending_requests": raw.get("pending_requests", {}),
+            "pending_requests": {
+                req_id: {k: v for k, v in req.items() if not k.startswith("_")}
+                for req_id, req in raw.get("pending_requests", {}).items()
+            },
             "approval_chains": raw.get("approval_chains", {}),
             "workflows": {wid: {k: v for k, v in wf.items() if not k.startswith("_")}
                           for wid, wf in raw.get("workflows", {}).items()},
             "incidents": raw.get("incidents", {}),
             "conflict_matrix": raw.get("conflict_matrix", {}),
             "compensating_controls": raw.get("compensating_controls", {}),
+            # Multi-agent oversight (empty for other tasks)
+            "sub_agents": {
+                sid: {k: v for k, v in a.items() if not k.startswith("_")}
+                for sid, a in raw.get("sub_agents", {}).items()
+            },
+            "identity_graph": raw.get("identity_graph", {}),
+            "rogue_agent_requests": {
+                req_id: {k: v for k, v in req.items() if not k.startswith("_")}
+                for req_id, req in raw.get("rogue_agent_requests", {}).items()
+            },
             # Last action results
             "audit_log": raw.get("audit_log", [])[-5:],   # last 5 actions
             "notifications": [],

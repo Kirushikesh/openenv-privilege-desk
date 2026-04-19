@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from .task_templates import get_task, TASK_GOAL_VARIANTS
+from .toxic_graph import IdentityGraph
 
 # ── Name pools ───────────────────────────────────────────────────────────────
 
@@ -40,6 +41,15 @@ ROLE_RANK = {"viewer": 0, "editor": 1, "admin": 2, "owner": 3}
 
 TTL_OPTIONS = [1, 2, 4, 8, 24, 48, 72]   # hours
 TICKET_PREFIXES = ["INC", "SEC", "OPS", "ENG"]
+
+SUB_AGENT_NAMES = [
+    "reporting-bot", "analytics-agent", "etl-runner", "audit-crawler",
+    "sync-daemon", "ml-pipeline", "data-exporter", "compliance-scanner",
+]
+SUB_AGENT_PURPOSES = [
+    "data aggregation", "compliance scanning", "report generation",
+    "log processing", "ETL sync", "analytics refresh", "security audit",
+]
 
 RISKY_REASONS = [
     "over_privileged",   # has admin/owner, only needs viewer/editor
@@ -169,6 +179,37 @@ class EpisodeGenerator:
                 incidents, users, resources, policies, rng
             )
 
+        # 6e. Multi-agent oversight — sub-agents + identity graph + rogue request
+        sub_agents: Dict[str, Any] = {}
+        identity_graph: Optional[IdentityGraph] = None
+        oversight_hidden: Dict[str, Any] = {}
+        if task_id == "multi_agent_oversight":
+            num_agents = scaled_count(*entity_counts.get("sub_agents", (2, 4)))
+            sub_agents = self._build_sub_agents(
+                num_agents, users, resources, entitlements, rng
+            )
+            # Build partial world snapshot needed by graph (resources + entitlements)
+            world_partial = {
+                "resources": resources,
+                "entitlements": entitlements,
+                "pending_requests": pending_requests,
+                "current_time": datetime(2024, 4, 8, 9, 0, 0).isoformat(),
+                "policies": policies,
+            }
+            identity_graph = self._build_identity_graph(
+                users, sub_agents, resources, entitlements, rng, difficulty_level
+            )
+            rogue_requests, oversight_hidden = self._build_rogue_requests(
+                identity_graph, world_partial, rng
+            )
+            # Merge rogue request into pending_requests
+            pending_requests.update(rogue_requests)
+            # Update legitimate_request_ids in oversight_hidden now that we know all req IDs
+            oversight_hidden["legitimate_request_ids"] = [
+                rid for rid in pending_requests
+                if rid not in oversight_hidden.get("rogue_request_ids", [])
+            ]
+
         # 7. Approval chains
         approval_chains: Dict[str, Any] = {}
         if "approval_chains" in entity_counts:
@@ -199,6 +240,7 @@ class EpisodeGenerator:
             incidents=incidents,
             sod_true_violations=sod_true_violations,
             sod_all_violations=sod_all_violations,
+            oversight_hidden=oversight_hidden,
             rng=rng,
         )
 
@@ -246,6 +288,14 @@ class EpisodeGenerator:
             "incidents": {
                 inc_id: {k: v for k, v in inc.items() if not k.startswith("_")}
                 for inc_id, inc in incidents.items()
+            },
+            # Multi-agent oversight fields (empty for other tasks)
+            "sub_agents": sub_agents,
+            "identity_graph": identity_graph.get_sanitized_json() if identity_graph else {},
+            "rogue_agent_requests": {
+                req_id: req
+                for req_id, req in pending_requests.items()
+                if req.get("_is_rogue", False)
             },
             # Tracking
             "subgoals": subgoals,
@@ -852,10 +902,83 @@ class EpisodeGenerator:
 
         return compensating_controls, true_violations, all_violations
 
+    # ── Multi-Agent Oversight builders ────────────────────────────────────────
+
+    def _build_sub_agents(
+        self,
+        n_agents: int,
+        users: Dict[str, Any],
+        resources: Dict[str, Any],
+        entitlements: Dict[str, Any],
+        rng: random.Random,
+    ) -> Dict[str, Any]:
+        """Create autonomous sub-agent identities that mirror the user schema."""
+        sub_agents: Dict[str, Any] = {}
+        user_ids = list(users.keys())
+        ent_ids = list(entitlements.keys())
+        names = rng.sample(SUB_AGENT_NAMES, min(n_agents, len(SUB_AGENT_NAMES)))
+
+        for i in range(n_agents):
+            sid = f"agent_{i:03d}"
+            creator = rng.choice(user_ids) if user_ids else None
+            purpose = rng.choice(SUB_AGENT_PURPOSES)
+            name = names[i] if i < len(names) else f"agent-{i}"
+
+            # Assign 1-2 existing entitlements to each sub-agent (for graph edges)
+            agent_ents = rng.sample(ent_ids, min(rng.randint(1, 2), len(ent_ids)))
+
+            sub_agents[sid] = {
+                "sub_agent_id": sid,
+                "name": name,
+                "purpose": purpose,
+                "created_by": creator,
+                "status": "active",
+                "entitlement_ids": agent_ents,
+                # Mirrors user schema so existing tools (entitlement.list, sod.check_user) work
+                "user_id": sid,
+                "department": "Automation",
+                "job_title": "Autonomous Agent",
+                "is_manager": False,
+                "manager_id": creator,
+                "email": f"{name}@agents.internal",
+            }
+
+        return sub_agents
+
+    def _build_identity_graph(
+        self,
+        users: Dict[str, Any],
+        sub_agents: Dict[str, Any],
+        resources: Dict[str, Any],
+        entitlements: Dict[str, Any],
+        rng: random.Random,
+        difficulty: int,
+    ) -> IdentityGraph:
+        """Build the identity DAG and inject a toxic combination."""
+        graph = IdentityGraph()
+        world_snapshot = {
+            "users": users,
+            "resources": resources,
+            "entitlements": entitlements,
+        }
+        graph.build_from_world(world_snapshot, sub_agents, rng)
+        graph.inject_toxic_combination(difficulty, rng)
+        return graph
+
+    def _build_rogue_requests(
+        self,
+        identity_graph: IdentityGraph,
+        world_state_partial: Dict[str, Any],
+        rng: random.Random,
+    ) -> tuple:
+        """Generate the rogue agent's access request and its hidden metadata."""
+        return identity_graph.generate_rogue_request(world_state_partial, rng)
+
     def _build_hidden_state(self, task_id, pending_requests, correct_decisions,
                             approval_chains, entitlements, risky_entitlement_ids,
                             workflows, policies, incidents=None,
-                            sod_true_violations=None, sod_all_violations=None, rng=None):
+                            sod_true_violations=None, sod_all_violations=None,
+                            oversight_hidden=None, rng=None):
         hidden = {
             "correct_decisions": correct_decisions,
             "correct_approval_chains": {
@@ -902,6 +1025,10 @@ class EpisodeGenerator:
             hidden["sod_minimum_revocations"] = [
                 v["entitlement_id_a"] for v in sod_true_violations
             ]
+
+        # Multi-agent oversight ground truth
+        if task_id == "multi_agent_oversight" and oversight_hidden:
+            hidden.update(oversight_hidden)
 
         return hidden
 
