@@ -170,29 +170,16 @@ All context you need is in the observation JSON.
 
 def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
     obs_summary = {
-        "task_id":               observation.get("task_id"),
         "task_goal":             observation.get("task_goal"),
         "step":                  observation.get("step"),
         "max_steps":             observation.get("max_steps"),
         "available_tools":       observation.get("available_tools", []),
-        "pending_requests":      observation.get("pending_requests", {}),
-        "policies":              observation.get("policies", {}),
-        "incidents":             observation.get("incidents", {}),
-        "conflict_matrix":       observation.get("conflict_matrix", {}),
-        "approval_chains":       observation.get("approval_chains", {}),
-        "entitlements": {
-            eid: {k: v for k, v in e.items()
-                  if k in ("role", "user_id", "resource_id",
-                           "days_since_use", "expires_at", "source")}
-            for eid, e in list(observation.get("entitlements", {}).items())[:15]
-        },
         "last_tool_result":      observation.get("tool_result"),
-        "review_target_user_id": observation.get("review_target_user_id"),
         "objectives":            observation.get("objectives", []),
     }
     history_str = ""
     if history:
-        history_str = "Recent history:\n" + "\n".join(history[-6:]) + "\n\n"
+        history_str = "PREVIOUS TOOL CALLS AND RESULTS:\n" + "\n".join(history[-6:]) + "\n\n"
 
     return (
         f"Current observation:\n{json.dumps(obs_summary, indent=2)}\n\n"
@@ -331,8 +318,18 @@ def rollout_once(
             step_rewards.append(step_reward)
 
         tool_name = action.get("tool_name", "?")
-        status    = (obs.get("tool_result") or {}).get("status", "?")
-        history.append(f"Step {_step + 1}: {tool_name} → {status}")
+        args_str  = json.dumps(action.get("arguments", {}))
+        tool_res  = obs.get("tool_result") or {}
+        
+        output = json.dumps(tool_res.get("result", {}))
+        if len(output) > 300:
+            output = output[:300] + "... (truncated)"
+            
+        history_str_entry = f"Step {_step + 1}: {tool_name} {args_str}\n  Output: {output}"
+        if tool_res.get("status") == "error":
+            history_str_entry += "\n  Status: error"
+            
+        history.append(history_str_entry)
 
     # Fallback: fetch grader score if env never set done=True (max_steps exceeded)
     if not done or episode_score == 0.0:

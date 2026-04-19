@@ -279,6 +279,26 @@ def run_baseline() -> Dict[str, Any]:
     }
 
 
+# ── Mount custom Gradio UI ────────────────────────────────────────────────────
+# Mounted at "/" so HuggingFace Spaces shows the beautiful UI at the root URL.
+# FastAPI routes (/reset, /step, /grader, /tasks, /docs) take precedence over
+# the Gradio sub-app because they are explicitly registered routes.
+
+try:
+    import gradio as gr
+
+    try:
+        from .gradio_ui import build_privilege_desk_ui
+    except ImportError:
+        from server.gradio_ui import build_privilege_desk_ui
+
+    _gradio_blocks = build_privilege_desk_ui()
+    gr.mount_gradio_app(app, _gradio_blocks, path="/")
+except Exception as _ui_err:
+    import logging as _logging
+    _logging.getLogger(__name__).warning("Custom Gradio UI not mounted: %s", _ui_err)
+
+
 # ── Server entry point ────────────────────────────────────────────────────────
 
 def main(host: str = "0.0.0.0", port: int = 8000):
