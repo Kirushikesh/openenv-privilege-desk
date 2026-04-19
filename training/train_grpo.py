@@ -1,69 +1,71 @@
 """
 train_grpo.py — GRPO + LoRA Curriculum Training for PrivilegeDesk
 
-Trains a single LLM-based agent across all 5 privilege management tasks using
-Group Relative Policy Optimization (GRPO) with curriculum learning.
+Follows the kube-sre-gym pattern (hackathon winner):
+  • rollout_func handles multi-step episodes with real env feedback (closed-loop)
+  • generate_rollout_completions drives per-step vLLM generation inside the loop
+  • reward_funcs are lightweight kwargs extractors — rewards are pre-computed in rollout
+  • DAPO improvements: asymmetric clipping, mask_truncated_completions, light KL penalty
 
 Curriculum phases
 ─────────────────
-  Phase 1 – Stabilize   : access_decision only          (easy,  5 steps)
-  Phase 2 – Expand      : + emergency_breakglass         (medium, 10 steps)
-  Phase 3 – Full        : + jit_escalation, access_review, separation_of_duties_audit
-                          Stratified sampling — easy tasks carry more weight early;
-                          harder tasks get more samples only after the model has
-                          mastered simpler ones.
+  Phase 1 – Stabilize : access_decision only
+  Phase 2 – Expand    : + emergency_breakglass
+  Phase 3 – Full      : all 5 tasks, stratified sampling
 
-Design notes
-────────────
-• counter-argument to the original AI recommendation:
-    - Tasks are ordered by *actual* difficulty (max_steps + grading complexity),
-      NOT by the vague label in the template.  access_review is hard (25 steps,
-      precision+recall grading), so it enters the curriculum *after* jit_escalation.
-    - "Harder tasks get more samples" is inverted early on.  Stratified sampling
-      starts heavily skewed toward easy tasks and shifts as training matures.
-    - Task 4 (emergency_breakglass) is structurally different from Task 1 —
-      it adds incident verification, security flagging, and a multi-step chain —
-      so it enters Phase 2 on its own before we pile on even harder tasks.
+Each phase trains a separate GRPOTrainer, carrying the LoRA adapter forward.
 
 Usage
 ─────
+  # With vLLM (recommended on A100/H100):
   python training/train_grpo.py \
-    --model-id "Qwen/Qwen2.5-3B-Instruct" \
+    --model-id "Qwen/Qwen3.5-2B" \
     --env-url  "http://localhost:8000" \
-    --phase all \
+    --use-vllm --vllm-mode colocate \
+    --report-to tensorboard \
     --episodes-per-phase 32 \
     --num-generations 8 \
-    --lora-rank 16 \
     --output-dir ./outputs/grpo_run1
 
-Environment variables
-─────────────────────
-  HF_TOKEN      Hugging Face / API auth token (required for model download)
-  ENV_URL       Override for --env-url
+  # Without vLLM (CPU / small GPU):
+  python training/train_grpo.py \
+    --model-id "Qwen/Qwen3.5-2B" \
+    --env-url  "http://localhost:8000" \
+    --episodes-per-phase 16 \
+    --output-dir ./outputs/grpo_run1
+
+  # Dry-run curriculum plan (no GPU needed):
+  python training/train_grpo.py --dry-run
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
 import random
 import sys
-import time
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 
-# ── Optional heavy deps (imported only when training, not for --dry-run) ──────
+# Critical for TRL + vLLM colocate on 80 GB GPU
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
+
 try:
     import torch
-    from transformers import AutoTokenizer, AutoModelForCausalLM
-    from peft import LoraConfig, get_peft_model, TaskType
+    from datasets import Dataset
+    from peft import LoraConfig
+    from transformers import AutoTokenizer
     from trl import GRPOConfig, GRPOTrainer
+    from trl.experimental.openenv import generate_rollout_completions
     _TRAINING_AVAILABLE = True
 except ImportError:
     _TRAINING_AVAILABLE = False
@@ -77,87 +79,63 @@ log = logging.getLogger("grpo_train")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Task registry — ground truth for curriculum ordering
+# Task registry + curriculum weights
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class TaskMeta:
     task_id: str
-    difficulty: str          # "easy" | "medium" | "hard"
-    max_steps: int           # from task_templates.py
-    phase: int               # curriculum phase this task enters (1, 2, or 3)
-    difficulty_level: int = 2  # environment difficulty_level for training (1–3)
+    difficulty: str
+    max_steps: int
+    phase: int
+    difficulty_level: int = 2
 
 
 TASK_REGISTRY: Dict[str, TaskMeta] = {
     "access_decision": TaskMeta(
-        task_id="access_decision",
-        difficulty="easy",
-        max_steps=5,
-        phase=1,
-        difficulty_level=2,  # medium world complexity for training
+        task_id="access_decision", difficulty="easy", max_steps=5, phase=1, difficulty_level=2,
     ),
     "emergency_breakglass": TaskMeta(
-        task_id="emergency_breakglass",
-        difficulty="medium",
-        max_steps=10,
-        phase=2,
-        difficulty_level=2,
+        task_id="emergency_breakglass", difficulty="medium", max_steps=10, phase=2, difficulty_level=2,
     ),
     "jit_escalation": TaskMeta(
-        task_id="jit_escalation",
-        difficulty="medium",
-        max_steps=15,
-        phase=3,
-        difficulty_level=2,
+        task_id="jit_escalation", difficulty="medium", max_steps=15, phase=3, difficulty_level=2,
     ),
     "access_review": TaskMeta(
-        task_id="access_review",
-        difficulty="hard",
-        max_steps=25,
-        phase=3,
-        difficulty_level=1,  # start at easy world complexity for hard tasks
+        task_id="access_review", difficulty="hard", max_steps=25, phase=3, difficulty_level=1,
     ),
     "separation_of_duties_audit": TaskMeta(
-        task_id="separation_of_duties_audit",
-        difficulty="hard",
-        max_steps=25,
-        phase=3,
-        difficulty_level=1,
+        task_id="separation_of_duties_audit", difficulty="hard", max_steps=25, phase=3, difficulty_level=1,
     ),
 }
 
-# Sampling weights per phase — index 0=phase1, 1=phase2, 2=phase3
-# Values are relative weights; tasks not in the current phase have weight 0.
-# Key insight: easy tasks dominate early; weights shift toward harder tasks as
-# the curriculum matures.  This is the *stratified sampling* the doc referred to.
 PHASE_WEIGHTS: Dict[int, Dict[str, float]] = {
-    1: {   # Phase 1: only access_decision
-        "access_decision":              1.00,
-        "emergency_breakglass":         0.00,
-        "jit_escalation":               0.00,
-        "access_review":                0.00,
-        "separation_of_duties_audit":   0.00,
+    1: {
+        "access_decision":            1.00,
+        "emergency_breakglass":       0.00,
+        "jit_escalation":             0.00,
+        "access_review":              0.00,
+        "separation_of_duties_audit": 0.00,
     },
-    2: {   # Phase 2: easy dominates, breakglass added
-        "access_decision":              0.60,
-        "emergency_breakglass":         0.40,
-        "jit_escalation":               0.00,
-        "access_review":                0.00,
-        "separation_of_duties_audit":   0.00,
+    2: {
+        "access_decision":            0.60,
+        "emergency_breakglass":       0.40,
+        "jit_escalation":             0.00,
+        "access_review":              0.00,
+        "separation_of_duties_audit": 0.00,
     },
-    3: {   # Phase 3: all tasks, harder gets proportionally more budget now
-        "access_decision":              0.20,
-        "emergency_breakglass":         0.20,
-        "jit_escalation":               0.25,
-        "access_review":                0.20,
-        "separation_of_duties_audit":   0.15,  # most steps → fewer episodes needed
+    3: {
+        "access_decision":            0.20,
+        "emergency_breakglass":       0.20,
+        "jit_escalation":             0.25,
+        "access_review":              0.20,
+        "separation_of_duties_audit": 0.15,
     },
 }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# System prompt (same structure as inference.py)
+# System prompt
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SYSTEM_PROMPT = textwrap.dedent("""
@@ -187,11 +165,10 @@ All context you need is in the observation JSON.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Rollout helpers
+# Prompt builder + action parser
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
-    """Build a compact prompt from the current observation and recent history."""
     obs_summary = {
         "task_id":               observation.get("task_id"),
         "task_goal":             observation.get("task_goal"),
@@ -203,7 +180,6 @@ def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
         "incidents":             observation.get("incidents", {}),
         "conflict_matrix":       observation.get("conflict_matrix", {}),
         "approval_chains":       observation.get("approval_chains", {}),
-        # Truncate large entitlements dict to keep prompt compact
         "entitlements": {
             eid: {k: v for k, v in e.items()
                   if k in ("role", "user_id", "resource_id",
@@ -225,156 +201,7 @@ def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
     )
 
 
-def rollout_once(
-    env_url: str,
-    task_id: str,
-    seed: int,
-    tokenizer,
-    model,
-    difficulty_level: int = 2,
-    temperature: float = 0.8,
-    max_new_tokens: int = 256,
-    device: str = "cuda",
-) -> Tuple[List[str], List[str], List[float]]:
-    """
-    Run one full episode and collect (prompts, completions, rewards).
-
-    Reward design (verified against grader.py + world_state.py):
-      - Steps 1 … N-1 : raw per-step reward from the aggregator  (range −0.40 to +0.35)
-      - Step N (terminal): episode_score from the grader  (range 0.0–1.0)
-        The terminal step's regular reward is *replaced* by the graded episode score,
-        matching exactly how kube-sre-gym assigns reward — the environment judge's score
-        is the training signal, not an additive bonus on top of the step reward.
-        No multiplier is applied.  The grader score (0–1) is already on a compatible
-        scale with the per-step rewards (−0.40–+0.35) and provides plenty of variance
-        for GRPO advantage computation.
-
-    Returns three parallel lists:
-        prompts     – one formatted prompt string per step
-        completions – one model completion string per step
-        rewards     – one float reward per step
-    """
-    import torch  # guard for --dry-run import mode
-
-    # Reset environment
-    resp = requests.post(
-        f"{env_url}/reset",
-        json={"task_id": task_id, "seed": seed, "difficulty_level": difficulty_level},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    obs = resp.json().get("observation", resp.json())
-    done = False
-
-    prompts: List[str] = []
-    completions: List[str] = []
-    rewards: List[float] = []
-    history: List[str] = []
-
-    max_steps = obs.get("max_steps", TASK_REGISTRY[task_id].max_steps)
-
-    for _step in range(max_steps):
-        if done:
-            break
-
-        # Build prompt
-        user_msg = _build_user_message(obs, history)
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": user_msg},
-        ]
-
-        # Tokenize with chat template
-        text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=4096)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-
-        # Generate
-        with torch.no_grad():
-            output_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=(temperature > 0),
-                pad_token_id=tokenizer.eos_token_id,
-            )
-
-        # Decode only the new tokens
-        new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
-        completion_text = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
-
-        # Parse action from completion
-        action = _parse_action(completion_text, obs.get("available_tools", []))
-
-        # Step environment
-        try:
-            step_resp = requests.post(
-                f"{env_url}/step",
-                json={"action": action},
-                timeout=30,
-            )
-            step_resp.raise_for_status()
-            step_data = step_resp.json()
-        except Exception as exc:
-            log.warning("Step request failed: %s — terminating episode", exc)
-            rewards.append(-0.20)  # penalty equivalent to _ERROR_PENALTY
-            prompts.append(text)
-            completions.append(completion_text)
-            break
-
-        obs = step_data.get("observation", {})
-        step_reward = float(step_data.get("reward", 0.0) or 0.0)
-        done = step_data.get("done", False)
-        # The environment already computes & returns episode_score in metadata
-        # on the terminal step (world_state.py lines 131-133).  Extract it here
-        # so we never need a separate /grader call.
-        metadata = step_data.get("metadata", {})
-        episode_score_from_env = metadata.get("episode_score")  # None on non-terminal steps
-
-        tool_result = obs.get("tool_result", {})
-        status = (tool_result or {}).get("status", "?")
-        observations_preview = ((tool_result or {}).get("observations") or [""])[0][:60]
-
-        # ── Reward assignment ──────────────────────────────────────────────────
-        # Non-terminal steps: use the raw per-step reward (−0.40 to +0.35).
-        # Terminal step: REPLACE with the episode graded score (0.0–1.0).
-        #   Why replace, not add?
-        #   - The graded score is the ground-truth signal for this whole episode.
-        #   - Adding it on top of a step reward obscures the signal and inflates
-        #     the last-step reward disproportionately vs all earlier steps.
-        #   - kube-sre-gym and OpenENV-Hackathon do NOT apply any multiplier;
-        #     they use the environment's reward directly at every step.
-        if done and episode_score_from_env is not None:
-            assigned_reward = float(episode_score_from_env)
-        else:
-            assigned_reward = step_reward
-
-        prompts.append(text)
-        completions.append(completion_text)
-        rewards.append(assigned_reward)
-        history.append(
-            f"Step {_step + 1}: {action.get('tool_name', '?')} → {status}: {observations_preview}"
-        )
-
-    # ── Fallback: if episode ended without done=True (e.g. max_steps hit without
-    #    the env setting terminated), fetch the final grade from /grader.
-    if rewards and episode_score_from_env is None:
-        try:
-            grade_resp = requests.post(f"{env_url}/grader", json={}, timeout=10)
-            fallback_score = float((grade_resp.json() if grade_resp.ok else {}).get("score", 0.0))
-            rewards[-1] = fallback_score  # replace last step reward, same as above
-            log.debug("Used /grader fallback: episode_score=%.3f", fallback_score)
-        except Exception:
-            pass  # leave last step reward as-is
-
-    return prompts, completions, rewards
-
-
 def _parse_action(text: str, available_tools: List[str]) -> Dict[str, Any]:
-    """Best-effort JSON parse; falls back to a safe no-op tool."""
-    # Try to extract the first JSON object
     start = text.find("{")
     end   = text.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -385,7 +212,6 @@ def _parse_action(text: str, available_tools: List[str]) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    # Fallback: pick the first available read-only tool
     fallback = next(
         (t for t in available_tools if t.endswith(".list") or t.endswith(".view")),
         (available_tools[0] if available_tools else "policy.list"),
@@ -393,462 +219,371 @@ def _parse_action(text: str, available_tools: List[str]) -> Dict[str, Any]:
     return {"tool_name": fallback, "arguments": {}}
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Dataset builder
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def build_phase_dataset(
-    env_url: str,
-    phase: int,
-    num_episodes: int,
-    tokenizer,
-    model,
-    seed_offset: int = 0,
-    temperature: float = 0.8,
-    device: str = "cuda",
-) -> Tuple[List[str], List[str], List[float]]:
-    """
-    Collect `num_episodes` rollouts for the given curriculum phase.
-
-    Episodes are sampled from tasks according to PHASE_WEIGHTS[phase].
-    Returns flat parallel lists of (prompt, completion, reward).
-    """
-    weights = PHASE_WEIGHTS[phase]
-    task_ids  = [tid for tid, w in weights.items() if w > 0]
-    task_probs = [weights[tid] for tid in task_ids]
-    # Normalize
-    total = sum(task_probs)
-    task_probs = [p / total for p in task_probs]
-
-    all_prompts: List[str] = []
-    all_completions: List[str] = []
-    all_rewards: List[float] = []
-
-    for ep_idx in range(num_episodes):
-        # Sample task according to curriculum weights
-        task_id = random.choices(task_ids, weights=task_probs, k=1)[0]
-        meta = TASK_REGISTRY[task_id]
-        seed = seed_offset + ep_idx * 97 + hash(task_id) % 10_000
-
-        log.info(
-            "Phase %d | Episode %d/%d | task=%s | seed=%d",
-            phase, ep_idx + 1, num_episodes, task_id, seed,
+def _apply_chat_template(tokenizer, messages: List[Dict[str, str]]) -> str:
+    try:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
         )
+    except TypeError:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Rollout — one full episode (closed-loop, env feedback at every step)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def rollout_once(
+    trainer: "GRPOTrainer",
+    env_url: str,
+    task_id: str,
+    seed: int,
+    tokenizer,
+    difficulty_level: int = 2,
+) -> Dict[str, Any]:
+    """
+    Run one full PrivilegeDesk episode using generate_rollout_completions
+    for per-step vLLM-backed generation.
+
+    Token sequences are accumulated across turns — same pattern as kube-sre-gym:
+    GRPO assigns the episode-level reward to the full token sequence.
+
+    Returns:
+        prompt_ids, completion_ids, logprobs   — full episode token sequences
+        episode_score                          — grader score (0–1), main signal
+        mean_step_reward                       — mean per-step reward, secondary signal
+    """
+    resp = requests.post(
+        f"{env_url}/reset",
+        json={"task_id": task_id, "seed": seed, "difficulty_level": difficulty_level},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    obs = resp.json().get("observation", resp.json())
+
+    prompt_ids:     List[int]   = []
+    completion_ids: List[int]   = []
+    logprobs:       List[float] = []
+    step_rewards:   List[float] = []
+    history:        List[str]   = []
+    episode_score:  float       = 0.0
+    done:           bool        = False
+
+    max_steps     = obs.get("max_steps", TASK_REGISTRY[task_id].max_steps)
+    MAX_TOK_ACCUM = 4096  # prevent CUDA OOM on long episodes
+
+    for _step in range(max_steps):
+        if done or len(completion_ids) >= MAX_TOK_ACCUM:
+            break
+
+        user_msg = _build_user_message(obs, history)
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": user_msg},
+        ]
+        prompt_text = _apply_chat_template(tokenizer, messages)
+
+        # generate_rollout_completions delegates to vLLM (colocate/server) or
+        # falls back to standard HF generate when use_vllm=False.
+        try:
+            rollout_out = generate_rollout_completions(trainer, [prompt_text])[0]
+        except Exception as exc:
+            log.warning("generate_rollout_completions failed at step %d: %s", _step, exc)
+            step_rewards.append(-0.20)
+            break
+
+        prompt_ids.extend(rollout_out["prompt_ids"])
+        completion_ids.extend(rollout_out["completion_ids"])
+        logprobs.extend(rollout_out["logprobs"])
+
+        completion_text = rollout_out.get("text") or tokenizer.decode(
+            rollout_out["completion_ids"], skip_special_tokens=True
+        )
+        action = _parse_action(completion_text, obs.get("available_tools", []))
 
         try:
-            prompts, completions, rewards = rollout_once(
-                env_url=env_url,
-                task_id=task_id,
-                seed=seed,
-                tokenizer=tokenizer,
-                model=model,
-                difficulty_level=meta.difficulty_level,
-                temperature=temperature,
-                device=device,
+            step_resp = requests.post(
+                f"{env_url}/step", json={"action": action}, timeout=30,
             )
+            step_resp.raise_for_status()
+            step_data = step_resp.json()
         except Exception as exc:
-            log.error("Episode failed (task=%s, seed=%d): %s", task_id, seed, exc)
-            continue
+            log.warning("Step request failed: %s — ending episode", exc)
+            step_rewards.append(-0.20)
+            break
 
-        all_prompts.extend(prompts)
-        all_completions.extend(completions)
-        all_rewards.extend(rewards)
+        obs          = step_data.get("observation", {})
+        step_reward  = float(step_data.get("reward", 0.0) or 0.0)
+        done         = step_data.get("done", False)
+        metadata     = step_data.get("metadata", {})
 
-        log.info(
-            "  → steps=%d | rewards=[min=%.2f mean=%.2f max=%.2f]",
-            len(rewards),
-            min(rewards) if rewards else 0,
-            sum(rewards) / max(len(rewards), 1),
-            max(rewards) if rewards else 0,
-        )
+        if done and metadata.get("episode_score") is not None:
+            episode_score = float(metadata["episode_score"])
+            step_rewards.append(episode_score)   # terminal step gets grader score
+        else:
+            step_rewards.append(step_reward)
 
-    return all_prompts, all_completions, all_rewards
+        tool_name = action.get("tool_name", "?")
+        status    = (obs.get("tool_result") or {}).get("status", "?")
+        history.append(f"Step {_step + 1}: {tool_name} → {status}")
 
+    # Fallback: fetch grader score if env never set done=True (max_steps exceeded)
+    if not done or episode_score == 0.0:
+        try:
+            gr = requests.post(f"{env_url}/grader", json={}, timeout=10)
+            fallback = float((gr.json() if gr.ok else {}).get("score", 0.0))
+            if fallback > 0.0:
+                episode_score = fallback
+                if step_rewards:
+                    step_rewards[-1] = episode_score
+        except Exception:
+            pass
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Model + LoRA setup
-# ═══════════════════════════════════════════════════════════════════════════════
+    mean_step_reward = sum(step_rewards) / max(len(step_rewards), 1)
 
-def load_model_and_tokenizer(
-    model_id: str,
-    lora_rank: int = 16,
-    lora_alpha: int = 32,
-    lora_dropout: float = 0.05,
-    target_modules: Optional[List[str]] = None,
-    device: str = "cuda",
-    load_in_4bit: bool = False,
-):
-    """Load a causal LM with LoRA adapters for GRPO fine-tuning."""
-    if not _TRAINING_AVAILABLE:
-        raise RuntimeError(
-            "Training dependencies not installed. "
-            "Run: pip install torch transformers peft trl"
-        )
-
-    log.info("Loading tokenizer: %s", model_id)
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    log.info("Loading model: %s  (4bit=%s)", model_id, load_in_4bit)
-
-    load_kwargs: Dict[str, Any] = {
-        "trust_remote_code": True,
-        "torch_dtype": torch.bfloat16,
+    return {
+        "prompt_ids":       prompt_ids,
+        "completion_ids":   completion_ids,
+        "logprobs":         logprobs,
+        "episode_score":    episode_score,
+        "mean_step_reward": mean_step_reward,
     }
-    if load_in_4bit:
-        from transformers import BitsAndBytesConfig
-        load_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
-        load_kwargs["device_map"] = "auto"
-    else:
-        load_kwargs["device_map"] = device
-
-    model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
-
-    # Wrap with LoRA
-    resolved_targets = target_modules or [
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
-    ]
-    lora_cfg = LoraConfig(
-        r=lora_rank,
-        lora_alpha=lora_alpha,
-        target_modules=resolved_targets,
-        lora_dropout=lora_dropout,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM,
-    )
-    model = get_peft_model(model, lora_cfg)
-    model.print_trainable_parameters()
-
-    return model, tokenizer
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GRPO training step
+# Reward extractors (TRL convention — read from rollout_func kwargs)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_grpo_phase(
-    model,
-    tokenizer,
-    prompts: List[str],
-    completions: List[str],
-    rewards: List[float],
-    output_dir: str,
+def reward_episode_score(completions: List[str], **kwargs) -> List[float]:
+    """Primary signal: grader score (0–1) for the full episode."""
+    return [float(r) for r in kwargs.get("episode_score", [0.0] * len(completions))]
+
+
+def reward_step_efficiency(completions: List[str], **kwargs) -> List[float]:
+    """Secondary signal: mean per-step reward — rewards good exploration."""
+    return [float(r) for r in kwargs.get("mean_step_reward", [0.0] * len(completions))]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase training
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def train_phase(
     phase: int,
-    learning_rate: float = 2e-6,
-    num_generations: int = 8,
-    per_device_batch: int = 2,
-    gradient_accumulation: int = 4,
-    max_prompt_length: int = 2048,
-    max_completion_length: int = 256,
-):
-    """
-    Run one GRPO training pass over the collected rollout data.
-
-    GRPO computes group-relative advantages:
-        A_i = (r_i - mean(r_group)) / (std(r_group) + ε)
-
-    This requires `num_generations` completions per prompt to compute meaningful
-    group statistics.  Here we treat each unique prompt as a "group" and each
-    step's completion as one member.
-    """
-    if not prompts:
-        log.warning("Phase %d: no rollout data collected, skipping GRPO step.", phase)
-        return
-
-    phase_output = Path(output_dir) / f"phase{phase}"
-    phase_output.mkdir(parents=True, exist_ok=True)
-
-    # Build a dataset-compatible dict for TRL GRPOTrainer
-    # GRPOTrainer expects: {"prompt": str, "completion": str, "reward": float}
-    dataset_records = [
-        {"prompt": p, "completion": c, "reward": float(r)}
-        for p, c, r in zip(prompts, completions, rewards)
-    ]
-
-    # Save rollout data for analysis
-    rollout_path = phase_output / "rollouts.jsonl"
-    with rollout_path.open("w") as f:
-        for rec in dataset_records:
-            f.write(json.dumps(rec) + "\n")
-    log.info("Saved %d rollout records → %s", len(dataset_records), rollout_path)
-
-    # TRL GRPOTrainer configuration
-    grpo_cfg = GRPOConfig(
-        output_dir=str(phase_output),
-        learning_rate=learning_rate,
-        per_device_train_batch_size=per_device_batch,
-        gradient_accumulation_steps=gradient_accumulation,
-        num_generations=num_generations,
-        max_prompt_length=max_prompt_length,
-        max_completion_length=max_completion_length,
-        logging_steps=1,
-        save_steps=50,
-        warmup_ratio=0.05,
-        report_to="none",
-        remove_unused_columns=False,
-    )
-
-    # Reward function for GRPOTrainer — looks up pre-collected rewards
-    reward_lookup = {(p, c): r for p, c, r in zip(prompts, completions, rewards)}
-
-    def reward_fn(prompts_batch, completions_batch, **kwargs) -> List[float]:
-        return [
-            reward_lookup.get((p, c), 0.0)
-            for p, c in zip(prompts_batch, completions_batch)
-        ]
-
-    try:
-        from datasets import Dataset
-        hf_dataset = Dataset.from_list([{"prompt": p} for p in prompts])
-    except ImportError:
-        log.error("'datasets' package not found. Install: pip install datasets")
-        return
-
-    trainer = GRPOTrainer(
-        model=model,
-        args=grpo_cfg,
-        train_dataset=hf_dataset,
-        tokenizer=tokenizer,
-        reward_funcs=reward_fn,
-    )
-
-    log.info("Starting GRPO training for Phase %d (%d samples)...", phase, len(prompts))
-    trainer.train()
-
-    # Save LoRA adapter after each phase
-    adapter_dir = phase_output / "adapter"
-    model.save_pretrained(str(adapter_dir))
-    tokenizer.save_pretrained(str(adapter_dir))
-    log.info("Saved Phase %d adapter → %s", phase, adapter_dir)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Evaluation helper
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def evaluate_phase(
+    model_id: str,
+    tokenizer,
     env_url: str,
-    phase: int,
-    tokenizer,
-    model,
-    eval_episodes: int = 5,
-    seed_offset: int = 900_000,
-    device: str = "cuda",
-) -> Dict[str, float]:
+    args: argparse.Namespace,
+    seed_offset: int,
+    reward_log_path: Path,
+) -> str:
     """
-    Run deterministic evaluation episodes on each task available at this phase.
-    Returns per-task mean episode scores.
-    """
-    weights = PHASE_WEIGHTS[phase]
-    active_tasks = [tid for tid, w in weights.items() if w > 0]
-    results: Dict[str, List[float]] = {tid: [] for tid in active_tasks}
+    Train one curriculum phase.
 
-    for task_id in active_tasks:
-        meta = TASK_REGISTRY[task_id]
-        for ep_i in range(eval_episodes):
-            seed = seed_offset + ep_i * 13 + hash(task_id) % 5_000
+    rollout_func is called by GRPOTrainer once per GRPO step (with a batch of
+    prompts from the dataset).  It runs full closed-loop episodes and returns
+    the raw token sequences + pre-computed rewards.  Reward extractors then pull
+    those rewards out of kwargs — no environment call happens inside the extractors.
+
+    Returns the path to the saved LoRA adapter for this phase (used as model_id
+    for the next phase to continue training from).
+    """
+    weights    = PHASE_WEIGHTS[phase]
+    task_ids   = [tid for tid, w in weights.items() if w > 0]
+    task_probs = [weights[tid] for tid in task_ids]
+    total_w    = sum(task_probs)
+    task_probs = [p / total_w for p in task_probs]
+
+    episode_counter = [0]
+    all_scores:      List[float] = []
+
+    # ── rollout_func: called by GRPOTrainer with one prompt per episode slot ──
+    def rollout_func(prompts: List[str], trainer: "GRPOTrainer") -> Dict[str, Any]:
+        ep_prompt_ids:     List[List[int]]   = []
+        ep_completion_ids: List[List[int]]   = []
+        ep_logprobs:       List[List[float]] = []
+        ep_scores:         List[float]       = []
+        ep_step_rewards:   List[float]       = []
+
+        for _ in prompts:
+            task_id = random.choices(task_ids, weights=task_probs, k=1)[0]
+            meta    = TASK_REGISTRY[task_id]
+            seed    = seed_offset + episode_counter[0] * 97 + hash(task_id) % 10_000
+
+            log.info(
+                "Phase %d | Episode %d | task=%s | seed=%d",
+                phase, episode_counter[0] + 1, task_id, seed,
+            )
+
             try:
-                _, _, rewards = rollout_once(
+                ep = rollout_once(
+                    trainer=trainer,
                     env_url=env_url,
                     task_id=task_id,
                     seed=seed,
                     tokenizer=tokenizer,
-                    model=model,
                     difficulty_level=meta.difficulty_level,
-                    temperature=0.0,   # greedy for eval
-                    device=device,
                 )
-                # rewards[-1] IS the episode_score (grader output, 0–1) for
-                # terminal steps, per the design in rollout_once().
-                episode_score = float(rewards[-1]) if rewards else 0.0
-                results[task_id].append(episode_score)
             except Exception as exc:
-                log.warning("Eval episode failed (task=%s): %s", task_id, exc)
+                log.error("Episode failed (task=%s seed=%d): %s", task_id, seed, exc)
+                ep = {
+                    "prompt_ids": [], "completion_ids": [], "logprobs": [],
+                    "episode_score": 0.0, "mean_step_reward": 0.0,
+                }
 
-    summary = {
-        tid: round(sum(scores) / max(len(scores), 1), 4)
-        for tid, scores in results.items()
-    }
-    log.info("Phase %d eval: %s", phase, summary)
-    return summary
+            ep_prompt_ids.append(ep["prompt_ids"])
+            ep_completion_ids.append(ep["completion_ids"])
+            ep_logprobs.append(ep["logprobs"])
+            ep_scores.append(ep["episode_score"])
+            ep_step_rewards.append(ep["mean_step_reward"])
+
+            all_scores.append(ep["episode_score"])
+            episode_counter[0] += 1
+
+            with open(reward_log_path, "a", newline="") as f:
+                csv.writer(f).writerow([
+                    episode_counter[0], phase, task_id, seed,
+                    round(ep["episode_score"], 4),
+                    round(ep["mean_step_reward"], 4),
+                    datetime.now().isoformat(),
+                ])
+
+            log.info(
+                "  → episode_score=%.3f | mean_step=%.3f | running_mean=%.3f",
+                ep["episode_score"], ep["mean_step_reward"],
+                sum(all_scores) / len(all_scores),
+            )
+
+        return {
+            "prompt_ids":       ep_prompt_ids,
+            "completion_ids":   ep_completion_ids,
+            "logprobs":         ep_logprobs,
+            "episode_score":    ep_scores,
+            "mean_step_reward": ep_step_rewards,
+        }
+
+    # ── GRPOConfig ────────────────────────────────────────────────────────────
+    phase_out = Path(args.output_dir) / f"phase{phase}"
+    phase_out.mkdir(parents=True, exist_ok=True)
+
+    grpo_cfg = GRPOConfig(
+        output_dir=str(phase_out),
+        learning_rate=args.learning_rate,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=args.grad_accum,
+        generation_batch_size=args.num_generations,
+        num_generations=args.num_generations,
+        max_completion_length=512,
+        warmup_steps=2,
+        max_grad_norm=1.0,
+        temperature=args.temperature,
+        logging_steps=1,
+        save_steps=max(args.episodes_per_phase // 2, 1),
+        save_total_limit=2,
+        report_to=args.report_to,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        # DAPO improvements (same as kube-sre-gym)
+        loss_type="dapo",              # asymmetric clipping + dynamic sampling
+        mask_truncated_completions=True,  # drop token-capped episodes from loss
+        beta=0.01,                     # light KL — allow the model to diverge from base
+        # vLLM (optional)
+        use_vllm=args.use_vllm,
+        **({"vllm_mode": args.vllm_mode,
+            "vllm_gpu_memory_utilization": args.vllm_gpu_memory_utilization}
+           if args.use_vllm else {}),
+    )
+
+    peft_cfg = LoraConfig(
+        r=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+    )
+
+    # Dummy dataset — each entry triggers one episode in rollout_func.
+    # The prompt text is ignored; rollout_func samples tasks from PHASE_WEIGHTS.
+    dataset = Dataset.from_dict({
+        "prompt": ["Resolve this IAM privilege management task."] * args.episodes_per_phase
+    })
+
+    trainer = GRPOTrainer(
+        model=model_id,
+        processing_class=tokenizer,
+        reward_funcs=[reward_episode_score, reward_step_efficiency],
+        train_dataset=dataset,
+        args=grpo_cfg,
+        rollout_func=rollout_func,
+        peft_config=peft_cfg,
+    )
+
+    log.info(
+        "Starting GRPO Phase %d — %d episodes | tasks=%s",
+        phase, args.episodes_per_phase, task_ids,
+    )
+    trainer.train()
+
+    adapter_dir = phase_out / "adapter"
+    trainer.save_model(str(adapter_dir))
+    tokenizer.save_pretrained(str(adapter_dir))
+    log.info("Phase %d complete. Adapter → %s", phase, adapter_dir)
+    return str(adapter_dir)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Main — full curriculum training loop
+# Argument parser
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def main():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="GRPO + LoRA curriculum training for PrivilegeDesk",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     # Model
-    parser.add_argument("--model-id",    default="Qwen/Qwen2.5-3B-Instruct",
-                        help="HF model ID or local path")
-    parser.add_argument("--lora-rank",   type=int, default=16,
-                        help="LoRA rank r")
-    parser.add_argument("--lora-alpha",  type=int, default=32,
-                        help="LoRA scaling alpha")
-    parser.add_argument("--load-4bit",   action="store_true",
+    parser.add_argument("--model-id",   default="Qwen/Qwen3.5-2B")
+    parser.add_argument("--lora-rank",  type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--load-4bit",  action="store_true",
                         help="Load model in 4-bit (BitsAndBytes) for low VRAM")
 
     # Environment
-    parser.add_argument("--env-url",     default=os.getenv("ENV_URL", "http://localhost:8000"),
-                        help="PrivilegeDesk server URL")
+    parser.add_argument("--env-url", default=os.getenv("ENV_URL", "http://localhost:8000"))
+
+    # vLLM
+    parser.add_argument("--use-vllm",  action="store_true",
+                        help="Enable vLLM for fast inference during rollouts (recommended on H100)")
+    parser.add_argument("--vllm-mode", choices=["colocate", "server"], default="colocate",
+                        help="vLLM mode: colocate (1 GPU) or server (separate process)")
+    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.5,
+                        help="Fraction of GPU memory for vLLM (0.0–1.0)")
 
     # Curriculum
-    parser.add_argument("--phase",       default="all",
-                        choices=["1", "2", "3", "all"],
-                        help="Which curriculum phase(s) to run")
-    parser.add_argument("--episodes-per-phase", type=int, default=32,
-                        help="Number of rollout episodes per curriculum phase")
-    parser.add_argument("--eval-episodes",      type=int, default=5,
-                        help="Eval episodes per task after each phase")
+    parser.add_argument("--phase", default="all", choices=["1", "2", "3", "all"])
+    parser.add_argument("--episodes-per-phase", type=int, default=32)
 
     # GRPO hyperparams
-    parser.add_argument("--num-generations",    type=int,   default=8,
-                        help="GRPO: number of completions per prompt for group advantage")
-    parser.add_argument("--learning-rate",      type=float, default=2e-6,
-                        help="AdamW learning rate")
-    parser.add_argument("--per-device-batch",   type=int,   default=2)
-    parser.add_argument("--grad-accum",         type=int,   default=4)
-    parser.add_argument("--temperature",        type=float, default=0.8,
-                        help="Sampling temperature during rollout")
-    parser.add_argument("--seed",               type=int,   default=42,
-                        help="Random seed base")
+    parser.add_argument("--num-generations", type=int,   default=8,
+                        help="G for GRPO — completions per prompt for group advantage")
+    parser.add_argument("--learning-rate",   type=float, default=2e-6)
+    parser.add_argument("--grad-accum",      type=int,   default=8)
+    parser.add_argument("--temperature",     type=float, default=1.0,
+                        help="T=1.0 is optimal for GRPO exploration diversity")
+    parser.add_argument("--seed",            type=int,   default=42)
+    parser.add_argument("--report-to",      default="tensorboard",
+                        choices=["tensorboard", "wandb", "none"],
+                        help="Logging backend for tensorboard / wandb / none")
 
     # Output
-    parser.add_argument("--output-dir",  default="./outputs/grpo_curriculum",
-                        help="Root directory for adapters and logs")
-    parser.add_argument("--dry-run",     action="store_true",
-                        help="Print config and exit without training (no GPU needed)")
+    parser.add_argument("--output-dir", default="./outputs/grpo_curriculum")
+    parser.add_argument("--dry-run",    action="store_true",
+                        help="Print curriculum plan and exit (no GPU needed)")
 
-    args = parser.parse_args()
-
-    # ── Seed
-    random.seed(args.seed)
-
-    log.info("=" * 60)
-    log.info("PrivilegeDesk GRPO Curriculum Training")
-    log.info("  model          : %s", args.model_id)
-    log.info("  lora_rank      : %d  alpha=%d  4bit=%s", args.lora_rank, args.lora_alpha, args.load_4bit)
-    log.info("  phase(s)       : %s", args.phase)
-    log.info("  episodes/phase : %d", args.episodes_per_phase)
-    log.info("  num_generations: %d", args.num_generations)
-    log.info("  output_dir     : %s", args.output_dir)
-    log.info("=" * 60)
-
-    if args.dry_run:
-        log.info("--dry-run: exiting before model load.")
-        _print_curriculum_plan(args)
-        sys.exit(0)
-
-    if not _TRAINING_AVAILABLE:
-        log.error(
-            "Training dependencies missing. Install with:\n"
-            "  pip install torch transformers peft trl datasets"
-        )
-        sys.exit(1)
-
-    # ── Device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    log.info("Using device: %s", device)
-    if device == "cpu":
-        log.warning("No CUDA GPU detected — training will be extremely slow.")
-
-    # ── Load model
-    model, tokenizer = load_model_and_tokenizer(
-        model_id=args.model_id,
-        lora_rank=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        load_in_4bit=args.load_4bit,
-        device=device,
-    )
-
-    # ── Determine which phases to run
-    phases = [1, 2, 3] if args.phase == "all" else [int(args.phase)]
-
-    eval_summary: Dict[int, Dict[str, float]] = {}
-    seed_offset_base = args.seed * 1000
-
-    for phase in phases:
-        log.info("\n" + "─" * 60)
-        log.info("CURRICULUM PHASE %d", phase)
-        log.info(_phase_description(phase))
-        log.info("─" * 60)
-
-        # Collect rollouts for this phase
-        prompts, completions, rewards = build_phase_dataset(
-            env_url=args.env_url,
-            phase=phase,
-            num_episodes=args.episodes_per_phase,
-            tokenizer=tokenizer,
-            model=model,
-            seed_offset=seed_offset_base + phase * 10_000,
-            temperature=args.temperature,
-            device=device,
-        )
-
-        log.info(
-            "Phase %d rollouts: %d steps | reward [min=%.3f mean=%.3f max=%.3f]",
-            phase, len(rewards),
-            min(rewards) if rewards else 0,
-            sum(rewards) / max(len(rewards), 1),
-            max(rewards) if rewards else 0,
-        )
-
-        # GRPO training step
-        run_grpo_phase(
-            model=model,
-            tokenizer=tokenizer,
-            prompts=prompts,
-            completions=completions,
-            rewards=rewards,
-            output_dir=args.output_dir,
-            phase=phase,
-            learning_rate=args.learning_rate,
-            num_generations=args.num_generations,
-            per_device_batch=args.per_device_batch,
-            gradient_accumulation=args.grad_accum,
-        )
-
-        # Post-phase evaluation
-        log.info("Evaluating after Phase %d...", phase)
-        eval_summary[phase] = evaluate_phase(
-            env_url=args.env_url,
-            phase=phase,
-            tokenizer=tokenizer,
-            model=model,
-            eval_episodes=args.eval_episodes,
-            seed_offset=seed_offset_base + 900_000,
-            device=device,
-        )
-
-    # ── Save final model
-    final_out = Path(args.output_dir) / "final"
-    final_out.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(str(final_out))
-    tokenizer.save_pretrained(str(final_out))
-
-    # Save eval summary
-    summary_path = final_out / "eval_summary.json"
-    summary_path.write_text(json.dumps(eval_summary, indent=2))
-
-    log.info("\n" + "=" * 60)
-    log.info("Training complete!")
-    log.info("Final model → %s", final_out)
-    log.info("Eval summary:")
-    for ph, scores in eval_summary.items():
-        log.info("  Phase %d: %s", ph, scores)
-    log.info("=" * 60)
+    return parser.parse_args()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -856,32 +591,104 @@ def main():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _phase_description(phase: int) -> str:
-    descs = {
-        1: "Phase 1 (Stabilize): access_decision only — confirm GRPO converges",
-        2: "Phase 2 (Expand): + emergency_breakglass — adds incident verification",
-        3: "Phase 3 (Full): all 5 tasks — stratified sampling favors harder tasks more",
-    }
-    return descs.get(phase, f"Phase {phase}")
+    return {
+        1: "Phase 1 (Stabilize): access_decision only",
+        2: "Phase 2 (Expand): + emergency_breakglass",
+        3: "Phase 3 (Full): all 5 tasks, stratified sampling",
+    }.get(phase, f"Phase {phase}")
 
 
-def _print_curriculum_plan(args):
-    """Print a human-readable curriculum plan (for --dry-run)."""
+def _print_curriculum_plan(args: argparse.Namespace):
     phases = [1, 2, 3] if args.phase == "all" else [int(args.phase)]
-    print("\nCurriculum Plan:")
+    print("\nCurriculum plan:")
     print("─" * 60)
     for phase in phases:
         weights = PHASE_WEIGHTS[phase]
-        active = {tid: w for tid, w in weights.items() if w > 0}
+        active  = {tid: w for tid, w in weights.items() if w > 0}
         total_w = sum(active.values())
-        print(f"\n  Phase {phase}: {_phase_description(phase)}")
+        print(f"\n  {_phase_description(phase)}")
         for tid, w in active.items():
-            meta = TASK_REGISTRY[tid]
+            meta  = TASK_REGISTRY[tid]
             n_eps = round(args.episodes_per_phase * w / total_w)
             print(
-                f"    {tid:<32} weight={w:.0%}  ~{n_eps} episodes  "
-                f"(max_steps={meta.max_steps}  difficulty={meta.difficulty})"
+                f"    {tid:<32} weight={w:.0%}  ~{n_eps} eps  "
+                f"max_steps={meta.max_steps}"
             )
     print()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    args = parse_args()
+    random.seed(args.seed)
+
+    log.info("=" * 60)
+    log.info("PrivilegeDesk GRPO Curriculum Training")
+    log.info("  model          : %s", args.model_id)
+    log.info("  lora_rank      : %d  alpha=%d", args.lora_rank, args.lora_alpha)
+    log.info("  phase(s)       : %s", args.phase)
+    log.info("  episodes/phase : %d", args.episodes_per_phase)
+    log.info("  num_generations: %d", args.num_generations)
+    log.info("  use_vllm       : %s  mode=%s", args.use_vllm,
+             args.vllm_mode if args.use_vllm else "n/a")
+    log.info("  report_to      : %s", args.report_to)
+    log.info("  output_dir     : %s", args.output_dir)
+    log.info("=" * 60)
+
+    if args.dry_run:
+        _print_curriculum_plan(args)
+        log.info("--dry-run: exiting before model load.")
+        sys.exit(0)
+
+    if not _TRAINING_AVAILABLE:
+        log.error(
+            "Training dependencies missing.\n"
+            "  pip install torch transformers peft trl datasets"
+        )
+        sys.exit(1)
+
+    # ── Tokenizer ─────────────────────────────────────────────────────────────
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # ── Reward log ────────────────────────────────────────────────────────────
+    out_root = Path(args.output_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+    reward_log_path = out_root / "reward_log.csv"
+    with open(reward_log_path, "w", newline="") as f:
+        csv.writer(f).writerow([
+            "episode", "phase", "task_id", "seed",
+            "episode_score", "mean_step_reward", "timestamp",
+        ])
+
+    # ── Curriculum loop ───────────────────────────────────────────────────────
+    phases           = [1, 2, 3] if args.phase == "all" else [int(args.phase)]
+    current_model_id = args.model_id   # updated each phase to load the saved adapter
+
+    for phase in phases:
+        log.info("\n" + "─" * 60)
+        log.info(_phase_description(phase))
+        log.info("─" * 60)
+
+        current_model_id = train_phase(
+            phase=phase,
+            model_id=current_model_id,
+            tokenizer=tokenizer,
+            env_url=args.env_url,
+            args=args,
+            seed_offset=args.seed * 1000 + phase * 10_000,
+            reward_log_path=reward_log_path,
+        )
+
+    log.info("\n" + "=" * 60)
+    log.info("Training complete!")
+    log.info("Final adapter : %s", current_model_id)
+    log.info("Reward log    : %s", reward_log_path)
+    log.info("=" * 60)
 
 
 if __name__ == "__main__":
