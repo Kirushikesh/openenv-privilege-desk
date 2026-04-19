@@ -281,7 +281,7 @@ def run_baseline() -> Dict[str, Any]:
 
 # ── Server entry point ────────────────────────────────────────────────────────
 
-def main(host: str = "0.0.0.0", port: int = 8000):
+def main(host: str = "0.0.0.0", port: int = 8001):
     import uvicorn
     uvicorn.run(app, host=host, port=port)
 
