@@ -340,10 +340,7 @@ def rollout_once(
         # TRL expects logprobs as List[Tuple[float,...]] so lp[0] yields the float.
         # generate_rollout_completions may return plain floats — wrap if needed.
         raw_lps = rollout_out.get("logprobs") or []
-        if raw_lps and isinstance(raw_lps[0], (int, float)):
-            logprobs.extend([(float(lp),) for lp in raw_lps])
-        else:
-            logprobs.extend(raw_lps)
+        logprobs.extend(raw_lps)
 
         completion_text = rollout_out.get("text") or tokenizer.decode(
             rollout_out["completion_ids"], skip_special_tokens=True
@@ -579,8 +576,8 @@ def train_phase(
         learning_rate=args.learning_rate,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=args.grad_accum,
-        generation_batch_size=args.num_generations,
         num_generations=args.num_generations,
+        max_prompt_length=2048,
         max_completion_length=512,
         warmup_steps=2,
         max_grad_norm=1.0,
