@@ -304,7 +304,7 @@ def rollout_once(
 
     prompt_ids:     List[int]   = []
     completion_ids: List[int]   = []
-    logprobs:       List = []   # List[Tuple[float,...]] — wrapped for TRL compatibility
+    logprobs:       List = []
     step_rewards:   List[float] = []
     history:        List[str]   = []
     episode_score:  float       = 0.0
@@ -576,6 +576,7 @@ def train_phase(
         learning_rate=args.learning_rate,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=args.grad_accum,
+        num_train_epochs=1,
         num_generations=args.num_generations,
         max_prompt_length=2048,
         max_completion_length=512,
@@ -658,7 +659,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lora-rank",  type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--load-4bit",  action="store_true",
-                        help="Load model in 4-bit (BitsAndBytes) for low VRAM")
+                        help="(unused) placeholder for future 4-bit quantization support")
 
     # Environment
     parser.add_argument("--env-url", default=os.getenv("ENV_URL", "http://localhost:8000"))
