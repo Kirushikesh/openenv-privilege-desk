@@ -21,6 +21,8 @@ dependencies = [
     "openai>=1.0.0", # for baseline inference script
     "requests>=2.33.1",
     "uvicorn>=0.44.0",
+    "wandb>=0.26.0",
+    "weave>=0.52.37",
 ]
 
 [tool.uv]

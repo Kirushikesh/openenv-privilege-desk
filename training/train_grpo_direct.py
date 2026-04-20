@@ -644,7 +644,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-accum",      type=int,   default=8)
     parser.add_argument("--temperature",     type=float, default=1.0)
     parser.add_argument("--seed",            type=int,   default=42)
-    parser.add_argument("--report-to",      default="tensorboard",
+    parser.add_argument("--report-to",      default="wandb",
                         choices=["tensorboard", "wandb", "none"])
 
     # Output
