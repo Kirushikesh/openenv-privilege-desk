@@ -63,7 +63,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 # Critical for TRL + vLLM colocate on 80 GB GPU
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
 
 try:
@@ -584,7 +584,7 @@ def train_phase(
         gradient_accumulation_steps=args.grad_accum,
         num_train_epochs=1,
         num_generations=args.num_generations,
-        max_prompt_length=2048,
+
         max_completion_length=512,
         warmup_steps=2,
         max_grad_norm=1.0,
