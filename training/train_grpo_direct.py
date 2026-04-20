@@ -59,10 +59,14 @@ try:
     from peft import LoraConfig
     from transformers import AutoTokenizer
     from trl import GRPOConfig, GRPOTrainer
-    from trl.experimental.openenv import generate_rollout_completions
     _TRAINING_AVAILABLE = True
 except ImportError:
     _TRAINING_AVAILABLE = False
+
+try:
+    from trl.experimental.openenv import generate_rollout_completions
+except ImportError:
+    generate_rollout_completions = None
 
 # Add project root to path so env/ imports resolve without an installed package
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -77,6 +81,44 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("grpo_train_direct")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRL / vLLM compatibility patch  (adapted from kube-sre-gym)
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRL 0.29.0 expects vLLM logprobs as list-of-lists (top-k per token), but
+# vLLM 0.11.x returns plain floats.  We monkey-patch GRPOTrainer.train so the
+# fix is applied automatically the moment training starts.
+
+_orig_vllm_gen = None
+
+
+def _patch_vllm_generate(trainer: "GRPOTrainer"):
+    global _orig_vllm_gen
+    if _orig_vllm_gen is not None or not hasattr(trainer, "vllm_generation"):
+        return
+    _orig_vllm_gen = trainer.vllm_generation.generate
+
+    def _wrapped_generate(**kwargs):
+        result = _orig_vllm_gen(**kwargs)
+        prompt_ids, completion_ids, logprobs, *rest = result
+        if logprobs and logprobs[0] and isinstance(logprobs[0][0], float):
+            logprobs = [[[lp] for lp in seq] for seq in logprobs]
+        return (prompt_ids, completion_ids, logprobs, *rest)
+
+    trainer.vllm_generation.generate = _wrapped_generate
+
+
+def patch_trl_vllm_compat():
+    if not _TRAINING_AVAILABLE:
+        return
+    _orig_train = GRPOTrainer.train
+
+    def _patched_train(self, *args, **kwargs):
+        _patch_vllm_generate(self)
+        return _orig_train(self, *args, **kwargs)
+
+    GRPOTrainer.train = _patched_train
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -691,6 +733,7 @@ def _print_curriculum_plan(args: argparse.Namespace):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    patch_trl_vllm_compat()
     args = parse_args()
     random.seed(args.seed)
 
