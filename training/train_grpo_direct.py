@@ -1,26 +1,16 @@
 """
-train_grpo.py — GRPO + LoRA Curriculum Training for PrivilegeDesk
+train_grpo_direct.py — GRPO + LoRA Curriculum Training for PrivilegeDesk
+                        (direct in-process environment, no HTTP server required)
 
-Follows the kube-sre-gym pattern (hackathon winner):
-  • rollout_func handles multi-step episodes with real env feedback (closed-loop)
-  • generate_rollout_completions drives per-step vLLM generation inside the loop
-  • reward_funcs are lightweight kwargs extractors — rewards are pre-computed in rollout
-  • DAPO improvements: asymmetric clipping, mask_truncated_completions, light KL penalty
-
-Curriculum phases
-─────────────────
-  Phase 1 – Stabilize : access_decision only
-  Phase 2 – Expand    : + emergency_breakglass
-  Phase 3 – Full      : all 5 tasks, stratified sampling
-
-Each phase trains a separate GRPOTrainer, carrying the LoRA adapter forward.
+Identical to train_grpo.py except rollout_once calls WorldState directly instead
+of hitting the HTTP /reset, /step, /grader endpoints.  This eliminates network
+round-trip latency and removes the dependency on a running server process.
 
 Usage
 ─────
   # With vLLM (recommended on A100/H100):
-  python training/train_grpo.py \
+  python training/train_grpo_direct.py \
     --model-id "Qwen/Qwen3.5-2B" \
-    --env-url  "http://localhost:8000" \
     --use-vllm --vllm-mode colocate \
     --report-to tensorboard \
     --episodes-per-phase 32 \
@@ -28,17 +18,16 @@ Usage
     --output-dir ./outputs/grpo_run1
 
   # Without vLLM (CPU / small GPU):
-  python training/train_grpo.py \
+  python training/train_grpo_direct.py \
     --model-id "Qwen/Qwen3.5-2B" \
-    --env-url  "http://localhost:8000" \
     --episodes-per-phase 16 \
     --output-dir ./outputs/grpo_run1
 
   # Dry-run curriculum plan (no GPU needed):
-  python training/train_grpo.py --dry-run
+  python training/train_grpo_direct.py --dry-run
 
   # Phase 4 only (adversarial multi-agent oversight):
-  python training/train_grpo.py \
+  python training/train_grpo_direct.py \
     --model-id ./outputs/grpo_run1/phase3/adapter \
     --phase 4 \
     --episodes-per-phase 32 \
@@ -60,8 +49,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import requests
-
 # Critical for TRL + vLLM colocate on 80 GB GPU
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
@@ -77,12 +64,19 @@ try:
 except ImportError:
     _TRAINING_AVAILABLE = False
 
+# Add project root to path so env/ imports resolve without an installed package
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from env.world_state import WorldState  # noqa: E402  (needs sys.path patch above)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("grpo_train")
+log = logging.getLogger("grpo_train_direct")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -271,12 +265,11 @@ def _apply_chat_template(tokenizer, messages: List[Dict[str, str]]) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Rollout — one full episode (closed-loop, env feedback at every step)
+# Rollout — one full episode (closed-loop, direct WorldState calls)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def rollout_once(
     trainer: "GRPOTrainer",
-    env_url: str,
     task_id: str,
     seed: int,
     tokenizer,
@@ -286,21 +279,15 @@ def rollout_once(
     Run one full PrivilegeDesk episode using generate_rollout_completions
     for per-step vLLM-backed generation.
 
-    Token sequences are accumulated across turns — same pattern as kube-sre-gym:
-    GRPO assigns the episode-level reward to the full token sequence.
+    Calls WorldState directly — no HTTP server required.
 
     Returns:
         prompt_ids, completion_ids, logprobs   — full episode token sequences
         episode_score                          — grader score (0–1), main signal
         mean_step_reward                       — mean per-step reward, secondary signal
     """
-    resp = requests.post(
-        f"{env_url}/reset",
-        json={"task_id": task_id, "seed": seed, "difficulty_level": difficulty_level},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    obs = resp.json().get("observation", resp.json())
+    world = WorldState()
+    obs = world.reset(seed=seed, task_id=task_id, difficulty_level=difficulty_level)
 
     prompt_ids:     List[int]   = []
     completion_ids: List[int]   = []
@@ -310,10 +297,10 @@ def rollout_once(
     episode_score:  float       = 0.0
     done:           bool        = False
     steps_taken:    int         = 0
-    think_steps:    int         = 0   # steps where model used <think> tags
+    think_steps:    int         = 0
 
     max_steps     = obs.get("max_steps", TASK_REGISTRY[task_id].max_steps)
-    MAX_TOK_ACCUM = 4096  # prevent CUDA OOM on long episodes
+    MAX_TOK_ACCUM = 4096
 
     for _step in range(max_steps):
         if done or len(completion_ids) >= MAX_TOK_ACCUM:
@@ -326,8 +313,6 @@ def rollout_once(
         ]
         prompt_text = _apply_chat_template(tokenizer, messages)
 
-        # generate_rollout_completions delegates to vLLM (colocate/server) or
-        # falls back to standard HF generate when use_vllm=False.
         try:
             rollout_out = generate_rollout_completions(trainer, [prompt_text])[0]
         except Exception as exc:
@@ -337,12 +322,7 @@ def rollout_once(
 
         prompt_ids.extend(rollout_out["prompt_ids"])
         completion_ids.extend(rollout_out["completion_ids"])
-        # TRL expects logprobs as List[Tuple[float,...]] so lp[0] yields the float.
-        # generate_rollout_completions may return plain floats — wrap if needed.
         raw_lps = rollout_out.get("logprobs") or []
-        # TRL's _generate_single_turn does lp[0] on every entry, so each
-        # logprob must be a 1-tuple. generate_rollout_completions returns plain
-        # floats, so wrap them here.
         if raw_lps and isinstance(raw_lps[0], (int, float)):
             logprobs.extend([(float(lp),) for lp in raw_lps])
         else:
@@ -357,46 +337,38 @@ def rollout_once(
         action = _parse_action(completion_text, obs.get("available_tools", []))
 
         try:
-            step_resp = requests.post(
-                f"{env_url}/step", json={"action": action}, timeout=30,
-            )
-            step_resp.raise_for_status()
-            step_data = step_resp.json()
+            obs, step_reward, terminated, truncated, info = world.step(action)
+            done = terminated or truncated
         except Exception as exc:
-            log.warning("Step request failed: %s — ending episode", exc)
+            log.warning("world.step failed: %s — ending episode", exc)
             step_rewards.append(-0.20)
             break
 
-        obs          = step_data.get("observation", {})
-        step_reward  = float(step_data.get("reward", 0.0) or 0.0)
-        done         = step_data.get("done", False)
-        metadata     = step_data.get("metadata", {})
-
-        if done and metadata.get("episode_score") is not None:
-            episode_score = float(metadata["episode_score"])
-            step_rewards.append(episode_score)   # terminal step gets grader score
+        if done and info.get("episode_score") is not None:
+            episode_score = float(info["episode_score"])
+            step_rewards.append(episode_score)
         else:
-            step_rewards.append(step_reward)
+            step_rewards.append(float(step_reward))
 
         tool_name = action.get("tool_name", "?")
         args_str  = json.dumps(action.get("arguments", {}))
-        tool_res  = obs.get("tool_result") or {}
-        
+        tool_res  = info.get("tool_result") or {}
+
         output = json.dumps(tool_res.get("result", {}))
         if len(output) > 300:
             output = output[:300] + "... (truncated)"
-            
+
         history_str_entry = f"Step {_step + 1}: {tool_name} {args_str}\n  Output: {output}"
         if tool_res.get("status") == "error":
             history_str_entry += "\n  Status: error"
-            
+
         history.append(history_str_entry)
 
-    # Fallback: fetch grader score if env never set done=True (max_steps exceeded)
+    # Fallback: compute grader score if env never signalled done (max_steps exceeded)
     if not done or episode_score == 0.0:
         try:
-            gr = requests.post(f"{env_url}/grader", json={}, timeout=10)
-            fallback = float((gr.json() if gr.ok else {}).get("score", 0.0))
+            score_dict = world.compute_episode_score()
+            fallback = float(score_dict.get("score", 0.0))
             if fallback > 0.0:
                 episode_score = fallback
                 if step_rewards:
@@ -469,7 +441,6 @@ def train_phase(
     phase: int,
     model_id: str,
     tokenizer,
-    env_url: str,
     args: argparse.Namespace,
     seed_offset: int,
     reward_log_path: Path,
@@ -482,8 +453,7 @@ def train_phase(
     the raw token sequences + pre-computed rewards.  Reward extractors then pull
     those rewards out of kwargs — no environment call happens inside the extractors.
 
-    Returns the path to the saved LoRA adapter for this phase (used as model_id
-    for the next phase to continue training from).
+    Returns the path to the saved LoRA adapter for this phase.
     """
     weights    = PHASE_WEIGHTS[phase]
     task_ids   = [tid for tid, w in weights.items() if w > 0]
@@ -494,7 +464,6 @@ def train_phase(
     episode_counter = [0]
     all_scores:      List[float] = []
 
-    # ── rollout_func: called by GRPOTrainer with one prompt per episode slot ──
     def rollout_func(prompts: List[str], trainer: "GRPOTrainer") -> Dict[str, Any]:
         ep_prompt_ids:     List[List[int]]   = []
         ep_completion_ids: List[List[int]]   = []
@@ -518,7 +487,6 @@ def train_phase(
             try:
                 ep = rollout_once(
                     trainer=trainer,
-                    env_url=env_url,
                     task_id=task_id,
                     seed=seed,
                     tokenizer=tokenizer,
@@ -595,11 +563,9 @@ def train_phase(
         report_to=args.report_to,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        # DAPO improvements (same as kube-sre-gym)
-        loss_type="dapo",              # asymmetric clipping + dynamic sampling
-        mask_truncated_completions=True,  # drop token-capped episodes from loss
-        beta=0.01,                     # light KL — allow the model to diverge from base
-        # vLLM (optional)
+        loss_type="dapo",
+        mask_truncated_completions=True,
+        beta=0.01,
         use_vllm=args.use_vllm,
         **({"vllm_mode": args.vllm_mode,
             "vllm_gpu_memory_utilization": args.vllm_gpu_memory_utilization}
@@ -616,8 +582,6 @@ def train_phase(
                         "gate_proj", "up_proj", "down_proj"],
     )
 
-    # Dummy dataset — each entry triggers one episode in rollout_func.
-    # The prompt text is ignored; rollout_func samples tasks from PHASE_WEIGHTS.
     dataset = Dataset.from_dict({
         "prompt": ["Resolve this IAM privilege management task."] * args.episodes_per_phase
     })
@@ -626,10 +590,10 @@ def train_phase(
         model=model_id,
         processing_class=tokenizer,
         reward_funcs=[
-            reward_episode_score,   # primary: grader score (0–1)
-            reward_step_efficiency, # secondary: mean per-step reward
-            reward_format,          # format: <think> tag compliance
-            reward_efficiency,      # efficiency: H* horizon decay
+            reward_episode_score,
+            reward_step_efficiency,
+            reward_format,
+            reward_efficiency,
         ],
         train_dataset=dataset,
         args=grpo_cfg,
@@ -656,7 +620,7 @@ def train_phase(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="GRPO + LoRA curriculum training for PrivilegeDesk",
+        description="GRPO + LoRA curriculum training for PrivilegeDesk (direct mode)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -664,40 +628,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-id",   default="Qwen/Qwen3.5-2B")
     parser.add_argument("--lora-rank",  type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
-    parser.add_argument("--load-4bit",  action="store_true",
-                        help="(unused) placeholder for future 4-bit quantization support")
-
-    # Environment
-    parser.add_argument("--env-url", default=os.getenv("ENV_URL", "http://localhost:8000"))
+    parser.add_argument("--load-4bit",  action="store_true")
 
     # vLLM
-    parser.add_argument("--use-vllm",  action="store_true",
-                        help="Enable vLLM for fast inference during rollouts (recommended on H100)")
-    parser.add_argument("--vllm-mode", choices=["colocate", "server"], default="colocate",
-                        help="vLLM mode: colocate (1 GPU) or server (separate process)")
-    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.5,
-                        help="Fraction of GPU memory for vLLM (0.0–1.0)")
+    parser.add_argument("--use-vllm",  action="store_true")
+    parser.add_argument("--vllm-mode", choices=["colocate", "server"], default="colocate")
+    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.5)
 
     # Curriculum
     parser.add_argument("--phase", default="all", choices=["1", "2", "3", "4", "all"])
     parser.add_argument("--episodes-per-phase", type=int, default=32)
 
     # GRPO hyperparams
-    parser.add_argument("--num-generations", type=int,   default=8,
-                        help="G for GRPO — completions per prompt for group advantage")
+    parser.add_argument("--num-generations", type=int,   default=8)
     parser.add_argument("--learning-rate",   type=float, default=2e-6)
     parser.add_argument("--grad-accum",      type=int,   default=8)
-    parser.add_argument("--temperature",     type=float, default=1.0,
-                        help="T=1.0 is optimal for GRPO exploration diversity")
+    parser.add_argument("--temperature",     type=float, default=1.0)
     parser.add_argument("--seed",            type=int,   default=42)
     parser.add_argument("--report-to",      default="tensorboard",
-                        choices=["tensorboard", "wandb", "none"],
-                        help="Logging backend for tensorboard / wandb / none")
+                        choices=["tensorboard", "wandb", "none"])
 
     # Output
     parser.add_argument("--output-dir", default="./outputs/grpo_curriculum")
-    parser.add_argument("--dry-run",    action="store_true",
-                        help="Print curriculum plan and exit (no GPU needed)")
+    parser.add_argument("--dry-run",    action="store_true")
 
     return parser.parse_args()
 
@@ -743,7 +696,7 @@ def main() -> None:
     random.seed(args.seed)
 
     log.info("=" * 60)
-    log.info("PrivilegeDesk GRPO Curriculum Training")
+    log.info("PrivilegeDesk GRPO Curriculum Training (direct mode)")
     log.info("  model          : %s", args.model_id)
     log.info("  lora_rank      : %d  alpha=%d", args.lora_rank, args.lora_alpha)
     log.info("  phase(s)       : %s", args.phase)
@@ -767,12 +720,10 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # ── Tokenizer ─────────────────────────────────────────────────────────────
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # ── Reward log ────────────────────────────────────────────────────────────
     out_root = Path(args.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
     reward_log_path = out_root / "reward_log.csv"
@@ -783,9 +734,8 @@ def main() -> None:
             "steps_taken", "format_rate", "timestamp",
         ])
 
-    # ── Curriculum loop ───────────────────────────────────────────────────────
     phases           = [1, 2, 3, 4] if args.phase == "all" else [int(args.phase)]
-    current_model_id = args.model_id   # updated each phase to load the saved adapter
+    current_model_id = args.model_id
 
     for phase in phases:
         log.info("\n" + "─" * 60)
@@ -796,7 +746,6 @@ def main() -> None:
             phase=phase,
             model_id=current_model_id,
             tokenizer=tokenizer,
-            env_url=args.env_url,
             args=args,
             seed_offset=args.seed * 1000 + phase * 10_000,
             reward_log_path=reward_log_path,
