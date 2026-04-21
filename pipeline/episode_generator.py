@@ -445,13 +445,9 @@ class EpisodeGenerator:
             resource = resources.get(resource_id, {})
 
             if i == 0:
-                # Main incident: valid at level 1/2, possibly invalid at level 3
-                if difficulty_level < 3:
-                    severity = rng.choice(["P1", "P2"])
-                    status = "active"
-                else:
-                    severity = rng.choice(["P1", "P2", "P2", "P3"])
-                    status = rng.choice(["active", "active", "resolved"])
+                # Main incident: outcome spread across seeds at all difficulty levels
+                severity = rng.choice(["P1", "P2", "P2", "P3"])
+                status = rng.choice(["active", "active", "resolved"])
             else:
                 # Decoy incidents for higher difficulty
                 severity = rng.choice(["P3", "P3", "P2"])

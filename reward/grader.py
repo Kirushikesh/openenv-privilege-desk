@@ -175,25 +175,40 @@ def grade_jit_escalation(world_state: Dict[str, Any]) -> Dict[str, Any]:
     correct_decisions = hidden.get("correct_decisions", {})
     correct_d = correct_decisions.get(req_id, {})
     correct_role = correct_d.get("correct_role", "viewer")
+    should_approve = correct_d.get("should_approve", True)
+
+    # 6. Final decision (computed early — needed for role/ttl deny exemption)
+    grant_activated = completion.get("grant_activated", False)
+    grant_denied = completion.get("grant_denied", False)
+
+    agent_denied_correctly = grant_denied and not should_approve
+
     requested_role = req.get("requested_role", "")
-    if ROLE_RANK.get(requested_role, 99) <= ROLE_RANK.get(correct_role, 0):
+    if agent_denied_correctly:
+        scores["correct_role"] = 1.0  # no role to grant — correct deny
+        details["role"] = {"agent": None, "correct": None, "note": "deny — role not applicable"}
+    elif ROLE_RANK.get(requested_role, 99) <= ROLE_RANK.get(correct_role, 0):
         scores["correct_role"] = 1.0
-    details["role"] = {"requested": requested_role, "max_allowed": correct_role}
+        details["role"] = {"requested": requested_role, "max_allowed": correct_role}
+    else:
+        details["role"] = {"requested": requested_role, "max_allowed": correct_role}
 
     # 5. Correct TTL
     agent_ttl = req.get("_agent_ttl")
     correct_ttl = correct_d.get("correct_ttl_hours", 4)
-    if agent_ttl is not None:
+    if agent_denied_correctly:
+        scores["correct_ttl"] = 1.0  # no TTL to set — correct deny
+        details["ttl"] = {"agent": None, "correct": None, "note": "deny — TTL not applicable"}
+    elif agent_ttl is not None:
         if agent_ttl == correct_ttl:
             scores["correct_ttl"] = 1.0
         elif abs(agent_ttl - correct_ttl) <= 2:
             scores["correct_ttl"] = 0.5
-    details["ttl"] = {"agent": agent_ttl, "correct": correct_ttl}
+        details["ttl"] = {"agent": agent_ttl, "correct": correct_ttl}
+    else:
+        details["ttl"] = {"agent": agent_ttl, "correct": correct_ttl}
 
     # 6. Final decision
-    grant_activated = completion.get("grant_activated", False)
-    grant_denied = completion.get("grant_denied", False)
-    should_approve = correct_d.get("should_approve", True)
 
     if grant_activated and should_approve:
         # Correctly activated an approved grant
@@ -357,22 +372,32 @@ def grade_emergency_breakglass(world_state: Dict[str, Any]) -> Dict[str, Any]:
     from pipeline.episode_generator import ROLE_RANK
     agent_role = req.get("_agent_role") or req.get("requested_role", "")
     correct_role = correct_bg.get("correct_role", "editor")
-    if agent_role == correct_role:
+    grant_denied = completion.get("grant_denied", False)
+    if not should_grant and grant_denied:
+        scores["correct_role"] = 1.0  # deny — no role to grant
+        details["role"] = {"agent": None, "correct": None, "note": "deny — role not applicable"}
+    elif agent_role == correct_role:
         scores["correct_role"] = 1.0
     elif ROLE_RANK.get(agent_role, 99) < ROLE_RANK.get(correct_role, 0):
         scores["correct_role"] = 0.5  # under-privileged — partial
-    details["role"] = {"agent": agent_role, "correct": correct_role}
+    else:
+        details["role"] = {"agent": agent_role, "correct": correct_role}
 
     # 3. Correct TTL (exact = 1.0, within ±1h = 0.5)
     agent_ttl = req.get("_agent_ttl")
     correct_ttl = correct_bg.get("correct_ttl_hours", 2)
-    if agent_ttl is not None:
+    if not should_grant and grant_denied:
+        scores["correct_ttl"] = 1.0  # deny — no TTL to set
+        details["ttl"] = {"agent": None, "correct": None, "note": "deny — TTL not applicable"}
+    elif agent_ttl is not None:
         diff = abs(int(agent_ttl) - int(correct_ttl))
         if diff == 0:
             scores["correct_ttl"] = 1.0
         elif diff <= 1:
             scores["correct_ttl"] = 0.5
-    details["ttl"] = {"agent": agent_ttl, "correct": correct_ttl}
+        details["ttl"] = {"agent": agent_ttl, "correct": correct_ttl}
+    else:
+        details["ttl"] = {"agent": agent_ttl, "correct": correct_ttl}
 
     # 4. Ticket attached
     ticket_referenced = bool(completion.get("ticket_referenced"))

@@ -39,9 +39,11 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from langchain.chat_models import init_chat_model
+from langchain_openai import ChatOpenAI
 from langchain.messages import HumanMessage, SystemMessage
 
 try:
+    import os
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
@@ -81,7 +83,8 @@ You operate inside the PrivilegeDesk environment, which simulates a corporate
 zero-standing-privilege access control system.
 
 Your job is to use the available tools to complete the assigned IAM task.
-You MUST reason inside <think>...</think> tags first, then emit EXACTLY ONE JSON object:
+You MUST reason inside <think>...</think> tags first, then emit EXACTLY ONE JSON object.
+Output NOTHING else — no extra text, no second JSON block, no repetition.
 
 <think>
 Brief reasoning about what to investigate or decide next.
@@ -93,7 +96,9 @@ Brief reasoning about what to investigate or decide next.
 
 Rules:
 - Only call tools listed in available_tools in the observation
-- No text outside the <think> block and JSON object
+- No text outside the <think> block and the single JSON object
+- ONE tool call per response — never output two JSON objects in one reply
+- Do NOT repeat a tool call you already made with the same arguments — check PREVIOUS TOOL CALLS before deciding
 - For access.decide: use "approve" or "deny" for the decision field
 - For entitlement.revoke: provide the entitlement_id
 - For review.submit / sod.submit_report: call when you have finished all revocations
@@ -119,7 +124,7 @@ def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
     metadata   = observation.get("tool_metadata", {})
     tool_names = observation.get("available_tools", [])
     enriched_tools = [
-        f"{name} — {metadata[name]['desc']} | args: "
+        f"name: {name} | desc: {metadata[name]['desc']} | args: "
         + (", ".join(f"{k}: {v}" for k, v in metadata[name]["args"].items()) or "no args")
         if name in metadata else name
         for name in tool_names
@@ -154,21 +159,59 @@ def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
     )
 
 
-def _parse_action(text: str, available_tools: List[str]) -> Optional[Dict[str, Any]]:
-    """Return parsed action dict, or None if the output is malformed (missing <think> or JSON)."""
+def _parse_action(text: str, available_tools: List[str]) -> Dict[str, Any]:
+    """Extract action from model output with graceful fallbacks. Never returns None.
+
+    Returns a dict with keys: tool_name, arguments, _format_score (0.0–1.0).
+    _format_score reflects output quality for reward shaping:
+      1.0 — valid JSON + <think> tags
+      0.7 — valid JSON, no <think>
+      0.4 — partial JSON (tool_name extracted via regex)
+      0.1 — tool name found in raw text
+      0.0 — completely unparseable
+    """
+    import re
     has_think = "<think>" in text and "</think>" in text
 
+    # Level 1: proper JSON with tool_name
     start = text.find("{")
     end   = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         try:
-            action = json.loads(text[start:end + 1])
-            if "tool_name" in action and has_think:
-                return action
+            blob = json.loads(text[start:end + 1])
+            if isinstance(blob, dict) and "tool_name" in blob:
+                return {
+                    "tool_name": blob["tool_name"],
+                    "arguments": blob.get("arguments", {}),
+                    "_format_score": 1.0 if has_think else 0.7,
+                }
         except json.JSONDecodeError:
             pass
 
-    return None
+    # Level 2: regex for {"tool_name": "..."} block
+    m = re.search(r'\{[^{}]*"tool_name"\s*:\s*"([^"]+)"[^{}]*\}', text, re.DOTALL)
+    if m:
+        try:
+            blob = json.loads(m.group())
+            return {
+                "tool_name": blob["tool_name"],
+                "arguments": blob.get("arguments", {}),
+                "_format_score": 0.4,
+            }
+        except json.JSONDecodeError:
+            return {"tool_name": m.group(1), "arguments": {}, "_format_score": 0.4}
+
+    # Level 3: tool_name key pattern without valid JSON
+    m2 = re.search(r'"?tool_name"?\s*[=:]\s*"?(\w+\.\w+)"?', text)
+    if m2 and m2.group(1) in available_tools:
+        return {"tool_name": m2.group(1), "arguments": {}, "_format_score": 0.1}
+
+    # Level 4: any known tool name mentioned in text
+    for t in available_tools:
+        if t in text:
+            return {"tool_name": t, "arguments": {}, "_format_score": 0.1}
+
+    return {"tool_name": "__UNPARSEABLE__", "arguments": {}, "_format_score": 0.0}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -215,6 +258,7 @@ def run_episode(
     done:          bool        = False
     steps_taken:   int         = 0
     think_steps:   int         = 0
+    llm_responses_md: List[str] = []
 
     for _step in range(max_steps):
         if done:
@@ -234,21 +278,28 @@ def run_episode(
             step_rewards.append(-0.20)
             break
 
+        llm_responses_md.append(f"## Step {_step}\n{completion_text}\n")
+
         has_think = "<think>" in completion_text and "</think>" in completion_text
         if has_think:
             think_steps += 1
         steps_taken += 1
 
         action = _parse_action(completion_text, obs.get("available_tools", []))
+        fmt_score = action.pop("_format_score", 1.0)
 
-        # Format violation: missing <think> tags or unparseable JSON → penalty, skip server call
-        if action is None:
-            log.debug("  step=%d  FORMAT VIOLATION (no <think>+JSON) — penalty -0.10", _step + 1)
+        # Completely unparseable → penalty and skip env call (no tool to run)
+        if action["tool_name"] == "__UNPARSEABLE__":
+            log.debug("  step=%d  UNPARSEABLE — penalty -0.10", _step + 1)
             step_rewards.append(-0.10)
-            history.append(f"Step {_step + 1}: [FORMAT VIOLATION — output missing <think>...</think> + JSON]")
+            history.append(f"Step {_step + 1}: [UNPARSEABLE — could not extract any tool call]")
             continue
 
-        log.debug("  step=%d  tool=%s  args=%s", _step + 1, action.get("tool_name"), action.get("arguments"))
+        # Partial parse → format penalty applied on top of env reward later
+        if fmt_score < 1.0:
+            log.debug("  step=%d  partial parse (fmt=%.1f)  tool=%s", _step + 1, fmt_score, action.get("tool_name"))
+        else:
+            log.debug("  step=%d  tool=%s  args=%s", _step + 1, action.get("tool_name"), action.get("arguments"))
 
         try:
             step_resp = requests.post(f"{env_url}/step", json={"action": action}, timeout=30)
@@ -268,11 +319,15 @@ def run_episode(
         if "tool_result" in info:
             obs["tool_result"] = info["tool_result"]
 
+        # Blend format quality into step reward: perfect format costs nothing,
+        # partial parse subtracts up to -0.10
+        fmt_penalty = (1.0 - fmt_score) * -0.10
+
         if done and info.get("episode_score") is not None:
             episode_score = float(info["episode_score"])
-            step_rewards.append(episode_score)
+            step_rewards.append(episode_score + fmt_penalty)
         else:
-            step_rewards.append(step_reward)
+            step_rewards.append(step_reward + fmt_penalty)
 
         tool_name = action.get("tool_name", "?")
         args_str  = json.dumps(action.get("arguments", {}))
@@ -297,6 +352,14 @@ def run_episode(
                     step_rewards[-1] = episode_score
         except Exception:
             pass
+
+    if debug_dir is not None:
+        try:
+            md_path = debug_dir / f"{task_id}_seed{seed}_llm_responses.md"
+            md_path.write_text("\n".join(llm_responses_md))
+            log.debug("  LLM responses saved → %s", md_path)
+        except Exception as exc:
+            log.warning("  Failed to save LLM responses: %s", exc)
 
     mean_step_reward = sum(step_rewards) / max(len(step_rewards), 1)
     format_rate      = think_steps / max(steps_taken, 1)
@@ -414,7 +477,18 @@ def main() -> None:
     except Exception as exc:
         raise SystemExit(f"Server not reachable at {args.env_url}: {exc}")
 
-    llm = init_chat_model(args.model).with_retry(stop_after_attempt=6)
+    # llm = init_chat_model(args.model).with_retry(stop_after_attempt=6)
+    import os
+
+    base_url = f'{os.getenv("RITS_URL", "")}'
+    llm = ChatOpenAI(
+        model=args.model,
+        temperature=0.3,
+        max_retries=2,
+        api_key="/",
+        base_url=base_url,
+        default_headers={"RITS_API_KEY": os.getenv("RITS_API_KEY", "")},
+    )
 
     results: List[Dict[str, Any]] = []
     seeds = list(range(args.seed_start, args.seed_start + args.seeds))
