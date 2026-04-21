@@ -551,6 +551,7 @@ def reward_efficiency(completions: List[str], **kwargs) -> List[float]:
 def train_phase(
     phase: int,
     model_id: str,
+    adapter_path: Optional[str],
     tokenizer,
     args: argparse.Namespace,
     seed_offset: int,
@@ -696,8 +697,23 @@ def train_phase(
         "prompt": ["Resolve this IAM privilege management task."] * args.episodes_per_phase
     })
 
+    if adapter_path is not None:
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM
+
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.bfloat16 if not args.load_4bit else None,
+            device_map="auto",
+            load_in_4bit=args.load_4bit,
+            trust_remote_code=True,
+        )
+        model = PeftModel.from_pretrained(base_model, adapter_path, is_trainable=True)
+    else:
+        model = model_id
+
     trainer = GRPOTrainer(
-        model=model_id,
+        model=model,
         processing_class=tokenizer,
         reward_funcs=[
             reward_episode_score,
@@ -708,7 +724,7 @@ def train_phase(
         train_dataset=dataset,
         args=grpo_cfg,
         rollout_func=rollout_func,
-        peft_config=peft_cfg,
+        peft_config=peft_cfg if adapter_path is None else None,
     )
 
     log.info(
@@ -846,16 +862,18 @@ def main() -> None:
         ])
 
     phases           = [1, 2, 3, 4] if args.phase == "all" else [int(args.phase)]
-    current_model_id = args.model_id
+    base_model_id    = args.model_id
+    current_adapter  = None
 
     for phase in phases:
         log.info("\n" + "─" * 60)
         log.info(_phase_description(phase))
         log.info("─" * 60)
 
-        current_model_id = train_phase(
+        current_adapter = train_phase(
             phase=phase,
-            model_id=current_model_id,
+            model_id=base_model_id,
+            adapter_path=current_adapter,
             tokenizer=tokenizer,
             args=args,
             seed_offset=args.seed * 1000 + phase * 10_000,
@@ -864,7 +882,7 @@ def main() -> None:
 
     log.info("\n" + "=" * 60)
     log.info("Training complete!")
-    log.info("Final adapter : %s", current_model_id)
+    log.info("Final adapter : %s", current_adapter)
     log.info("Reward log    : %s", reward_log_path)
     log.info("=" * 60)
 
