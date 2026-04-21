@@ -184,6 +184,17 @@ def grade_episode(body: Dict[str, Any] = None) -> Dict[str, Any]:
     }
 
 
+# ── /full_state ───────────────────────────────────────────────────────────────
+
+@app.get("/full_state")
+def full_state() -> Dict[str, Any]:
+    """Return the complete world state including hidden_state (for debugging)."""
+    global _world
+    if not _world._raw:
+        raise HTTPException(status_code=409, detail="No active episode. Call POST /reset first.")
+    return _world.full_state()
+
+
 # ── /tasks ────────────────────────────────────────────────────────────────────
 
 @app.get("/tasks")

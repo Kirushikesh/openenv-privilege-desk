@@ -70,19 +70,25 @@ def grade_access_decision(world_state: Dict[str, Any]) -> Dict[str, Any]:
         scores["correct_decision"] = 1.0
     details["decision"] = {"agent": agent_choice, "correct": correct_choice}
 
-    # 2. Correct role (only matters if approving)
-    if correct.get("should_approve") and agent_choice == "approve":
+    # 2. Correct role
+    from pipeline.episode_generator import ROLE_RANK
+    if not correct.get("should_approve") and agent_choice == "deny":
+        scores["correct_role"] = 1.0  # no role to grant — correct deny
+        details["role"] = {"agent": None, "correct": None, "note": "deny — role not applicable"}
+    elif correct.get("should_approve") and agent_choice == "approve":
         agent_role = agent_decision.get("role", "")
         correct_role = correct.get("correct_role", "")
-        from pipeline.episode_generator import ROLE_RANK
         if agent_role == correct_role:
             scores["correct_role"] = 1.0
         elif ROLE_RANK.get(agent_role, 99) < ROLE_RANK.get(correct_role, 0):
-            scores["correct_role"] = 0.5   # lower than allowed — partial credit
+            scores["correct_role"] = 0.5   # under-privileged — partial credit
         details["role"] = {"agent": agent_role, "correct": correct_role}
 
-    # 3. Correct TTL (within ±2h of correct value)
-    if agent_choice == "approve":
+    # 3. Correct TTL
+    if not correct.get("should_approve") and agent_choice == "deny":
+        scores["correct_ttl"] = 1.0  # no TTL to set — correct deny
+        details["ttl"] = {"agent": None, "correct": None, "note": "deny — TTL not applicable"}
+    elif agent_choice == "approve":
         agent_ttl = agent_decision.get("ttl_hours") or 0
         correct_ttl = correct.get("correct_ttl_hours", 0)
         if agent_ttl == correct_ttl:

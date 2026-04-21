@@ -794,7 +794,82 @@ TOOL_REGISTRY: Dict[str, Any] = {
 }
 
 
+TOOL_METADATA: Dict[str, Dict] = {
+    "policy.lookup":   {"desc": "Look up the policy that governs a resource",
+                        "args": {"resource_id": "string (required)"}},
+    "policy.list":     {"desc": "List all policies in the environment",
+                        "args": {}},
+    "org.get_user":    {"desc": "Get profile for a specific user",
+                        "args": {"user_id": "string (required)"}},
+    "org.get_manager": {"desc": "Get the management chain for a user",
+                        "args": {"user_id": "string (required)"}},
+    "org.list_users":  {"desc": "List all users, optionally filtered by department",
+                        "args": {"department": "string (optional)"}},
+    "request.view":    {"desc": "View a pending access request with requester and resource details",
+                        "args": {"request_id": "string (optional)"}},
+    "request.list":    {"desc": "List all pending requests",
+                        "args": {}},
+    "approval.route":  {"desc": "Route a request to a specific approver in the chain",
+                        "args": {"request_id": "string (required)", "approver_id": "string (required)"}},
+    "approval.check_status": {"desc": "Check the current approval chain status for a request",
+                              "args": {"request_id": "string (required)"}},
+    "access.decide":   {"desc": "Submit an approve or deny decision for a pending access request",
+                        "args": {"request_id": "string (optional)",
+                                 "decision": "approve | deny (required)",
+                                 "role": "viewer | editor | admin | owner (required for approve)",
+                                 "ttl_hours": "int, access duration in hours (required for approve)",
+                                 "justification_category": "operational | incident_response | deployment | audit (optional, default: operational)"}},
+    "access.grant":    {"desc": "Activate a fully approved access grant",
+                        "args": {"request_id": "string (required)",
+                                 "role": "viewer | editor | admin | owner (optional)"}},
+    "access.deny":     {"desc": "Explicitly deny a pending access escalation request",
+                        "args": {"request_id": "string (required)"}},
+    "access.set_ttl":  {"desc": "Set the TTL on a pending grant",
+                        "args": {"request_id": "string (required)", "ttl_hours": "int, duration in hours (required)"}},
+    "ticket.attach":   {"desc": "Attach a ticket or incident reference to a request",
+                        "args": {"request_id": "string (optional)", "ticket_id": "string (required)"}},
+    "entitlement.list":    {"desc": "List entitlements for a user or all users",
+                            "args": {"user_id": "string (optional)"}},
+    "entitlement.inspect": {"desc": "Inspect a specific entitlement and return its full details including expiry, usage, and risk indicators",
+                            "args": {"entitlement_id": "string (required)"}},
+    "entitlement.revoke":  {"desc": "Revoke a specific entitlement",
+                            "args": {"entitlement_id": "string (required)",
+                                     "reason": "access_review | sod_violation | policy_violation | orphaned_account | expired (optional, default: access_review)"}},
+    "audit.query":     {"desc": "Query the audit log filtered by user, resource, or time window",
+                        "args": {"user_id": "string (optional)", "resource_id": "string (optional)",
+                                 "days": "int (optional, default: 90)"}},
+    "audit.flag":      {"desc": "Flag a security event in the audit log",
+                        "args": {"incident_id": "string (required)",
+                                 "flag_type": "emergency_override | rogue_agent | sod_violation | policy_violation | suspicious_activity (optional, default: emergency_override)"}},
+    "group.resolve":   {"desc": "Resolve group membership and inherited entitlements",
+                        "args": {"group_id": "string (optional)", "user_id": "string (optional)"}},
+    "workflow.check_active": {"desc": "Check if a user has active workflows depending on an entitlement",
+                              "args": {"user_id": "string (optional)", "entitlement_id": "string (optional)"}},
+    "review.submit":   {"desc": "Submit the completed access review",
+                        "args": {"summary": "string (optional)"}},
+    "incident.verify": {"desc": "Verify an incident and retrieve its full details including on-call engineer and affected resource",
+                        "args": {"incident_id": "string (required)"}},
+    "sod.get_conflict_matrix":       {"desc": "Return the full separation of duties conflict matrix",
+                                      "args": {}},
+    "sod.check_user":                {"desc": "Check a user's entitlements for separation of duties violations",
+                                      "args": {"user_id": "string (required)"}},
+    "sod.get_compensating_controls": {"desc": "Return compensating controls for a user or specific conflict",
+                                      "args": {"user_id": "string (required)", "conflict_id": "string (optional)"}},
+    "sod.submit_report":             {"desc": "Submit the separation of duties audit report",
+                                      "args": {"summary": "string (optional)"}},
+    "emergency_breakglass":          {"desc": "Quarantine a user or agent and revoke all associated entitlements",
+                                      "args": {"agent_id": "string (required)",
+                                               "reason": "string (optional)"}},
+}
+
+
 def get_available_tools(task_available: list = None) -> list:
     if task_available:
         return [t for t in task_available if t in TOOL_REGISTRY]
     return list(TOOL_REGISTRY.keys())
+
+
+def get_tool_metadata(task_available: list = None) -> Dict[str, Dict]:
+    """Return TOOL_METADATA filtered to the task's available tools."""
+    keys = task_available if task_available else list(TOOL_METADATA.keys())
+    return {k: TOOL_METADATA[k] for k in keys if k in TOOL_METADATA}

@@ -252,11 +252,20 @@ All context you need is in the observation JSON.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
+    metadata   = observation.get("tool_metadata", {})
+    tool_names = observation.get("available_tools", [])
+    enriched_tools = [
+        f"{name} — {metadata[name]['desc']} | args: "
+        + (", ".join(f"{k}: {v}" for k, v in metadata[name]["args"].items()) or "no args")
+        if name in metadata else name
+        for name in tool_names
+    ]
+
     obs_summary: Dict[str, Any] = {
         "task_goal":        observation.get("task_goal"),
         "step":             observation.get("step"),
         "max_steps":        observation.get("max_steps"),
-        "available_tools":  observation.get("available_tools", []),
+        "available_tools":  enriched_tools,
         "last_tool_result": observation.get("tool_result"),
         "objectives":       observation.get("objectives", []),
         "pending_requests": observation.get("pending_requests", {}),
@@ -409,30 +418,32 @@ def rollout_once(
             step_rewards.append(-0.20)
             break
 
-        obs          = step_data.get("observation", {})
-        step_reward  = float(step_data.get("reward", 0.0) or 0.0)
-        done         = step_data.get("done", False)
-        metadata     = step_data.get("metadata", {})
+        obs         = step_data.get("observation", {})
+        info        = step_data.get("info", {})
+        step_reward = float(step_data.get("reward", 0.0) or 0.0)
+        done        = step_data.get("done", False)
 
-        if done and metadata.get("episode_score") is not None:
-            episode_score = float(metadata["episode_score"])
-            step_rewards.append(episode_score)   # terminal step gets grader score
+        # Inject tool_result into obs so _build_user_message surfaces it to the model
+        if "tool_result" in info:
+            obs["tool_result"] = info["tool_result"]
+
+        if done and info.get("episode_score") is not None:
+            episode_score = float(info["episode_score"])
+            step_rewards.append(episode_score)
         else:
             step_rewards.append(step_reward)
 
         tool_name = action.get("tool_name", "?")
         args_str  = json.dumps(action.get("arguments", {}))
         tool_res  = obs.get("tool_result") or {}
-        
-        output = json.dumps(tool_res.get("result", {}))
-        if len(output) > 300:
-            output = output[:300] + "... (truncated)"
-            
-        history_str_entry = f"Step {_step + 1}: {tool_name} {args_str}\n  Output: {output}"
+        output    = json.dumps(tool_res.get("result", {}))
+        if len(output) > 2000:
+            output = output[:2000] + "... (truncated)"
+
+        entry = f"Step {_step + 1}: {tool_name} {args_str}\n  Output: {output}"
         if tool_res.get("status") == "error":
-            history_str_entry += "\n  Status: error"
-            
-        history.append(history_str_entry)
+            entry += "\n  Status: error"
+        history.append(entry)
 
     # Fallback: fetch grader score if env never set done=True (max_steps exceeded)
     if not done or episode_score == 0.0:

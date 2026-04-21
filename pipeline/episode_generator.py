@@ -417,7 +417,6 @@ class EpisodeGenerator:
                 "max_role": max_role,
                 "max_ttl_hours": max_ttl,
                 "requires_approval_from": requires_approval,
-                "allowed_departments": rng.sample(DEPARTMENTS, rng.randint(1, 4)),
                 "breakglass_max_ttl_hours": breakglass_max_ttl,
                 "breakglass_allowed": breakglass_allowed,
                 "description": (
@@ -569,15 +568,20 @@ class EpisodeGenerator:
 
             # Compute correct decision
             if applicable_policy:
-                correct_role = applicable_policy["max_role"]  # must not exceed this
-                correct_ttl = applicable_policy["max_ttl_hours"]
-                # Approve if requested role doesn't exceed max_role
+                max_role = applicable_policy["max_role"]
+                max_ttl = applicable_policy["max_ttl_hours"]
+                correct_role = requested_role  # least-privilege: grant exactly what was requested
+                # Requester can ask for any TTL; correct grant is capped at policy max
+                requested_ttl = rng.choice(TTL_OPTIONS)
+                correct_ttl = min(requested_ttl, max_ttl)
+                # Approve if requested role doesn't exceed policy max
                 should_approve = (
                     ROLE_RANK.get(requested_role, 99)
-                    <= ROLE_RANK.get(correct_role, 0)
+                    <= ROLE_RANK.get(max_role, 0)
                 )
             else:
                 correct_role = "viewer"
+                requested_ttl = 4
                 correct_ttl = 4
                 should_approve = False
 
@@ -588,6 +592,7 @@ class EpisodeGenerator:
                 "resource_name": resource["name"],
                 "resource_type": resource["type"],
                 "requested_role": requested_role,
+                "requested_ttl_hours": requested_ttl,
                 "reason": reason,
                 "ticket_id": ticket_id,
                 "status": "pending",

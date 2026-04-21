@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 from .action_router import ActionRouter
-from .tools import get_available_tools
+from .tools import get_available_tools, get_tool_metadata
 
 
 class WorldState:
@@ -144,6 +144,7 @@ class WorldState:
             "max_steps": self.MAX_STEPS,
             "current_time": raw.get("current_time", ""),
             "available_tools": raw.get("available_tools", []),
+            "tool_metadata": get_tool_metadata(raw.get("available_tools")),
             # Org
             "users": {uid: {k: v for k, v in u.items()
                            if not k.startswith("_") and k != "status"}

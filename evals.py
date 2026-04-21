@@ -81,7 +81,7 @@ You operate inside the PrivilegeDesk environment, which simulates a corporate
 zero-standing-privilege access control system.
 
 Your job is to use the available tools to complete the assigned IAM task.
-You may reason first inside <think>...</think> tags, then emit EXACTLY ONE JSON object:
+You MUST reason inside <think>...</think> tags first, then emit EXACTLY ONE JSON object:
 
 <think>
 Brief reasoning about what to investigate or decide next.
@@ -116,11 +116,20 @@ All context you need is in the observation JSON.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
+    metadata   = observation.get("tool_metadata", {})
+    tool_names = observation.get("available_tools", [])
+    enriched_tools = [
+        f"{name} — {metadata[name]['desc']} | args: "
+        + (", ".join(f"{k}: {v}" for k, v in metadata[name]["args"].items()) or "no args")
+        if name in metadata else name
+        for name in tool_names
+    ]
+
     obs_summary: Dict[str, Any] = {
         "task_goal":        observation.get("task_goal"),
         "step":             observation.get("step"),
         "max_steps":        observation.get("max_steps"),
-        "available_tools":  observation.get("available_tools", []),
+        "available_tools":  enriched_tools,
         "last_tool_result": observation.get("tool_result"),
         "objectives":       observation.get("objectives", []),
         "pending_requests": observation.get("pending_requests", {}),
@@ -145,22 +154,21 @@ def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
     )
 
 
-def _parse_action(text: str, available_tools: List[str]) -> Dict[str, Any]:
+def _parse_action(text: str, available_tools: List[str]) -> Optional[Dict[str, Any]]:
+    """Return parsed action dict, or None if the output is malformed (missing <think> or JSON)."""
+    has_think = "<think>" in text and "</think>" in text
+
     start = text.find("{")
     end   = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         try:
             action = json.loads(text[start:end + 1])
-            if "tool_name" in action:
+            if "tool_name" in action and has_think:
                 return action
         except json.JSONDecodeError:
             pass
 
-    fallback = next(
-        (t for t in available_tools if t.endswith(".list") or t.endswith(".view")),
-        (available_tools[0] if available_tools else "policy.list"),
-    )
-    return {"tool_name": fallback, "arguments": {}}
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -174,6 +182,7 @@ def run_episode(
     seed: int,
     difficulty_level: int,
     max_steps: int,
+    debug_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Run one full episode and return metrics."""
     try:
@@ -188,6 +197,17 @@ def run_episode(
         return {"task_id": task_id, "seed": seed, "error": str(exc), "episode_score": 0.0}
 
     obs = resp.json().get("observation", resp.json())
+
+    if debug_dir is not None:
+        try:
+            state_resp = requests.get(f"{env_url}/full_state", timeout=10)
+            if state_resp.ok:
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                debug_path = debug_dir / f"{task_id}_seed{seed}.json"
+                debug_path.write_text(json.dumps(state_resp.json(), indent=2))
+                log.debug("  Debug state saved → %s", debug_path)
+        except Exception as exc:
+            log.warning("  Failed to save debug state: %s", exc)
 
     step_rewards:  List[float] = []
     history:       List[str]   = []
@@ -214,11 +234,20 @@ def run_episode(
             step_rewards.append(-0.20)
             break
 
-        if "<think>" in completion_text and "</think>" in completion_text:
+        has_think = "<think>" in completion_text and "</think>" in completion_text
+        if has_think:
             think_steps += 1
         steps_taken += 1
 
         action = _parse_action(completion_text, obs.get("available_tools", []))
+
+        # Format violation: missing <think> tags or unparseable JSON → penalty, skip server call
+        if action is None:
+            log.debug("  step=%d  FORMAT VIOLATION (no <think>+JSON) — penalty -0.10", _step + 1)
+            step_rewards.append(-0.10)
+            history.append(f"Step {_step + 1}: [FORMAT VIOLATION — output missing <think>...</think> + JSON]")
+            continue
+
         log.debug("  step=%d  tool=%s  args=%s", _step + 1, action.get("tool_name"), action.get("arguments"))
 
         try:
@@ -231,12 +260,16 @@ def run_episode(
             break
 
         obs         = step_data.get("observation", {})
+        info        = step_data.get("info", {})
         step_reward = float(step_data.get("reward", 0.0) or 0.0)
         done        = step_data.get("done", False)
-        metadata    = step_data.get("metadata", {})
 
-        if done and metadata.get("episode_score") is not None:
-            episode_score = float(metadata["episode_score"])
+        # Inject tool_result into obs so _build_user_message can surface it to the model
+        if "tool_result" in info:
+            obs["tool_result"] = info["tool_result"]
+
+        if done and info.get("episode_score") is not None:
+            episode_score = float(info["episode_score"])
             step_rewards.append(episode_score)
         else:
             step_rewards.append(step_reward)
@@ -245,8 +278,8 @@ def run_episode(
         args_str  = json.dumps(action.get("arguments", {}))
         tool_res  = obs.get("tool_result") or {}
         output    = json.dumps(tool_res.get("result", {}))
-        if len(output) > 300:
-            output = output[:300] + "... (truncated)"
+        if len(output) > 2000:
+            output = output[:2000] + "... (truncated)"
 
         entry = f"Step {_step + 1}: {tool_name} {args_str}\n  Output: {output}"
         if tool_res.get("status") == "error":
@@ -404,6 +437,7 @@ def main() -> None:
                 seed=seed,
                 difficulty_level=difficulty_level,
                 max_steps=max_steps,
+                debug_dir=Path(args.output_dir) / "debug",
             )
             results.append(result)
 
