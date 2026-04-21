@@ -162,3 +162,4 @@ competitor_research/
 outputs/grpo_*/
 outputs/2*/
 run_training.sh
+wandb/
