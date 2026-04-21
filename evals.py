@@ -38,12 +38,14 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from langchain.chat_models import init_chat_model
+from langchain.messages import HumanMessage, SystemMessage
+
 try:
-    from langchain_core.messages import HumanMessage, SystemMessage
-    from langchain_openai import ChatOpenAI
-    _LANGCHAIN_AVAILABLE = True
+    from dotenv import load_dotenv
+    load_dotenv()
 except ImportError:
-    _LANGCHAIN_AVAILABLE = False
+    pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -344,11 +346,6 @@ def save_csv(results: List[Dict[str, Any]], path: Path) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    if not _LANGCHAIN_AVAILABLE:
-        raise SystemExit(
-            "langchain-openai not installed.\n"
-            "Run: pip install langchain-openai langchain-core"
-        )
 
     parser = argparse.ArgumentParser(description="GPT-4o baseline eval on all 6 PrivilegeDesk tasks")
     parser.add_argument("--env-url",    default="http://localhost:8000",         help="PrivilegeDesk server URL")
@@ -384,11 +381,7 @@ def main() -> None:
     except Exception as exc:
         raise SystemExit(f"Server not reachable at {args.env_url}: {exc}")
 
-    llm = ChatOpenAI(
-        model=args.model,
-        temperature=args.temperature,
-        max_retries=3,
-    )
+    llm = init_chat_model(args.model).with_retry(stop_after_attempt=6)
 
     results: List[Dict[str, Any]] = []
     seeds = list(range(args.seed_start, args.seed_start + args.seeds))

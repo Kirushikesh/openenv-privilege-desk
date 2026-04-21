@@ -23,6 +23,9 @@ dependencies = [
     "uvicorn>=0.44.0",
     "wandb>=0.26.0",
     "weave>=0.52.37",
+    "python-dotenv>=1.2.2",
+    "langchain>=1.2.15",
+    "langchain-openai>=1.1.15",
 ]
 
 [tool.uv]
