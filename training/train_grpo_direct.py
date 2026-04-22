@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import logging
 import os
@@ -737,6 +738,21 @@ def train_phase(
     trainer.save_model(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
     log.info("Phase %d complete. Adapter → %s", phase, adapter_dir)
+
+    # Free GPU memory before next phase initialises a new vLLM engine.
+    if hasattr(trainer, "vllm_generation") and trainer.vllm_generation is not None:
+        if hasattr(trainer.vllm_generation, "llm"):
+            del trainer.vllm_generation.llm
+        del trainer.vllm_generation
+    del trainer
+    gc.collect()
+    torch.cuda.empty_cache()
+    log.info(
+        "GPU memory freed: %.2f GiB free / %.2f GiB total",
+        torch.cuda.mem_get_info()[0] / 1e9,
+        torch.cuda.mem_get_info()[1] / 1e9,
+    )
+
     return str(adapter_dir)
 
 
