@@ -421,6 +421,8 @@ def rollout_once(
         completion_text = rollout_out.get("text") or tokenizer.decode(
             rollout_out["completion_ids"], skip_special_tokens=True
         )
+        log.info("  [step=%d] completion (len=%d):\n%s\n--- END ---",
+                 _step + 1, len(completion_text), completion_text[:500])
         has_think = "<think>" in completion_text and "</think>" in completion_text
         if has_think:
             think_steps += 1

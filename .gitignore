@@ -165,3 +165,5 @@ run_training.sh
 wandb/
 evals/
 .bob/
+metrics_report/
+run_training_no_vllm.sh
