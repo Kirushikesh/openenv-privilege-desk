@@ -167,3 +167,4 @@ evals/
 .bob/
 metrics_report/
 run_training_no_vllm.sh
+hf_evals/

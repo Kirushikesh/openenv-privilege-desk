@@ -189,7 +189,7 @@ class HFChatModel(SimpleChatModel):
                 conversation,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=True,
             )
         except TypeError:
             prompt_text = self._tokenizer.apply_chat_template(
