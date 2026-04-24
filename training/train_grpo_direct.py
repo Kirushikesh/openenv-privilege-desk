@@ -346,7 +346,7 @@ def _parse_action(text: str, available_tools: List[str]) -> Dict[str, Any]:
 def _apply_chat_template(tokenizer, messages: List[Dict[str, str]]) -> str:
     try:
         return tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=True,
         )
     except TypeError:
         return tokenizer.apply_chat_template(
@@ -667,13 +667,12 @@ def train_phase(
         gradient_accumulation_steps=args.grad_accum,
         num_train_epochs=1,
         num_generations=args.num_generations,
-        max_completion_length=512,
+        max_completion_length=1024,
         warmup_steps=2,
         max_grad_norm=1.0,
         temperature=args.temperature,
         logging_steps=1,
-        save_steps=max(args.episodes_per_phase // 2, 1),
-        save_total_limit=2,
+        save_strategy="no",
         report_to=args.report_to,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
