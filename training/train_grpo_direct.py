@@ -8,19 +8,11 @@ round-trip latency and removes the dependency on a running server process.
 
 Usage
 ─────
-  # With vLLM (recommended on A100/H100):
   python training/train_grpo_direct.py \
     --model-id "Qwen/Qwen3.5-2B" \
-    --use-vllm --vllm-mode colocate \
     --report-to tensorboard \
     --episodes-per-phase 32 \
     --num-generations 8 \
-    --output-dir ./outputs/grpo_run1
-
-  # Without vLLM (CPU / small GPU):
-  python training/train_grpo_direct.py \
-    --model-id "Qwen/Qwen3.5-2B" \
-    --episodes-per-phase 16 \
     --output-dir ./outputs/grpo_run1
 
   # Dry-run curriculum plan (no GPU needed):
@@ -50,7 +42,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Critical for TRL + vLLM colocate on 80 GB GPU
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
 
@@ -82,44 +73,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("grpo_train_direct")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TRL / vLLM compatibility patch  (adapted from kube-sre-gym)
-# ═══════════════════════════════════════════════════════════════════════════════
-# TRL 0.29.0 expects vLLM logprobs as list-of-lists (top-k per token), but
-# vLLM 0.11.x returns plain floats.  We monkey-patch GRPOTrainer.train so the
-# fix is applied automatically the moment training starts.
-
-_orig_vllm_gen = None
-
-
-def _patch_vllm_generate(trainer: "GRPOTrainer"):
-    global _orig_vllm_gen
-    if _orig_vllm_gen is not None or not hasattr(trainer, "vllm_generation"):
-        return
-    _orig_vllm_gen = trainer.vllm_generation.generate
-
-    def _wrapped_generate(**kwargs):
-        result = _orig_vllm_gen(**kwargs)
-        prompt_ids, completion_ids, logprobs, *rest = result
-        if logprobs and logprobs[0] and isinstance(logprobs[0][0], float):
-            logprobs = [[[lp] for lp in seq] for seq in logprobs]
-        return (prompt_ids, completion_ids, logprobs, *rest)
-
-    trainer.vllm_generation.generate = _wrapped_generate
-
-
-def patch_trl_vllm_compat():
-    if not _TRAINING_AVAILABLE:
-        return
-    _orig_train = GRPOTrainer.train
-
-    def _patched_train(self, *args, **kwargs):
-        _patch_vllm_generate(self)
-        return _orig_train(self, *args, **kwargs)
-
-    GRPOTrainer.train = _patched_train
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -279,7 +232,7 @@ def _build_user_message(observation: Dict[str, Any], history: List[str]) -> str:
 
     history_str = ""
     if history:
-        history_str = "PREVIOUS TOOL CALLS AND RESULTS:\n" + "\n".join(history[-6:]) + "\n\n"
+        history_str = "PREVIOUS TOOL CALLS AND RESULTS:\n" + "\n".join(history[-15:]) + "\n\n"
 
     return (
         f"Current observation:\n{json.dumps(obs_summary, indent=2)}\n\n"
@@ -412,14 +365,10 @@ def rollout_once(
 
         prompt_ids.extend(rollout_out["prompt_ids"])
         completion_ids.extend(rollout_out["completion_ids"])
-        raw_lps = rollout_out.get("logprobs") or []
-        if raw_lps and isinstance(raw_lps[0], (int, float)):
-            logprobs.extend([(float(lp),) for lp in raw_lps])
-        else:
-            logprobs.extend(raw_lps)
+        logprobs.extend(rollout_out.get("logprobs") or [])
 
         completion_text = rollout_out.get("text") or tokenizer.decode(
-            rollout_out["completion_ids"], skip_special_tokens=True
+            rollout_out["completion_ids"], skip_special_tokens=False
         )
         log.info("  [step=%d] completion (len=%d):\n%s\n--- END ---",
                  _step + 1, len(completion_text), completion_text[:500])
@@ -479,7 +428,7 @@ def rollout_once(
         history.append(entry)
 
     # Fallback: compute grader score if env never signalled done (max_steps exceeded)
-    if not done or episode_score == 0.0:
+    if not done and episode_score == 0.0:
         try:
             score_dict = world.compute_episode_score()
             fallback = float(score_dict.get("score", 0.0))
@@ -667,10 +616,10 @@ def train_phase(
         gradient_accumulation_steps=args.grad_accum,
         num_train_epochs=1,
         num_generations=args.num_generations,
+        max_prompt_length=2048,
         max_completion_length=1024,
         warmup_steps=2,
         max_grad_norm=1.0,
-        temperature=args.temperature,
         logging_steps=1,
         save_strategy="no",
         report_to=args.report_to,
@@ -679,16 +628,12 @@ def train_phase(
         loss_type="dapo",
         mask_truncated_completions=True,
         beta=0.01,
-        use_vllm=args.use_vllm,
-        **({"vllm_mode": args.vllm_mode,
-            "vllm_gpu_memory_utilization": args.vllm_gpu_memory_utilization}
-           if args.use_vllm else {}),
     )
 
     peft_cfg = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
-        lora_dropout=0.05,
+        lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
@@ -740,11 +685,6 @@ def train_phase(
     tokenizer.save_pretrained(str(adapter_dir))
     log.info("Phase %d complete. Adapter → %s", phase, adapter_dir)
 
-    # Free GPU memory before next phase initialises a new vLLM engine.
-    if hasattr(trainer, "vllm_generation") and trainer.vllm_generation is not None:
-        if hasattr(trainer.vllm_generation, "llm"):
-            del trainer.vllm_generation.llm
-        del trainer.vllm_generation
     del trainer
     gc.collect()
     torch.cuda.empty_cache()
@@ -773,20 +713,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--load-4bit",  action="store_true")
 
-    # vLLM
-    parser.add_argument("--use-vllm",  action="store_true")
-    parser.add_argument("--vllm-mode", choices=["colocate", "server"], default="colocate")
-    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.5)
-
     # Curriculum
     parser.add_argument("--phase", default="all", choices=["1", "2", "3", "4", "all"])
-    parser.add_argument("--episodes-per-phase", type=int, default=32)
+    parser.add_argument("--episodes-per-phase", type=int, default=64)
 
     # GRPO hyperparams
-    parser.add_argument("--num-generations", type=int,   default=8)
+    parser.add_argument("--num-generations", type=int,   default=4)
     parser.add_argument("--learning-rate",   type=float, default=2e-6)
-    parser.add_argument("--grad-accum",      type=int,   default=8)
-    parser.add_argument("--temperature",     type=float, default=1.0)
+    parser.add_argument("--grad-accum",      type=int,   default=4)
     parser.add_argument("--seed",            type=int,   default=42)
     parser.add_argument("--report-to",      default="wandb",
                         choices=["tensorboard", "wandb", "none"])
@@ -835,7 +769,6 @@ def _print_curriculum_plan(args: argparse.Namespace):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    patch_trl_vllm_compat()
     args = parse_args()
     random.seed(args.seed)
 
@@ -846,8 +779,6 @@ def main() -> None:
     log.info("  phase(s)       : %s", args.phase)
     log.info("  episodes/phase : %d", args.episodes_per_phase)
     log.info("  num_generations: %d", args.num_generations)
-    log.info("  use_vllm       : %s  mode=%s", args.use_vllm,
-             args.vllm_mode if args.use_vllm else "n/a")
     log.info("  report_to      : %s", args.report_to)
     log.info("  output_dir     : %s", args.output_dir)
     log.info("=" * 60)
