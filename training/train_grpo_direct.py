@@ -45,20 +45,12 @@ from typing import Any, Dict, List, Optional
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
 
-try:
-    import torch
-    from datasets import Dataset
-    from peft import LoraConfig
-    from transformers import AutoTokenizer
-    from trl import GRPOConfig, GRPOTrainer
-    _TRAINING_AVAILABLE = True
-except ImportError:
-    _TRAINING_AVAILABLE = False
+import torch
+from datasets import Dataset
+from peft import LoraConfig
+from transformers import AutoTokenizer
+from trl import GRPOConfig, GRPOTrainer
 
-try:
-    from trl.experimental.openenv import generate_rollout_completions
-except ImportError:
-    generate_rollout_completions = None
 
 # Add project root to path so env/ imports resolve without an installed package
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -308,6 +300,62 @@ def _apply_chat_template(tokenizer, messages: List[Dict[str, str]]) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# No-vLLM generation fallback
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _generate_step_no_vllm(
+    trainer: "GRPOTrainer",
+    prompt_text: str,
+    tokenizer,
+    max_new_tokens: int = 512,
+) -> Dict[str, Any]:
+    """Generate one step directly from trainer.model (no vLLM required).
+
+    Returns the same dict shape as generate_rollout_completions()[0]:
+    prompt_ids, completion_ids, logprobs, text.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    model = trainer.model
+    device = next(model.parameters()).device
+
+    inputs = tokenizer(
+        prompt_text,
+        return_tensors="pt",
+    ).to(device)
+    prompt_len = inputs["input_ids"].shape[1]
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            return_dict_in_generate=True,
+            output_scores=True,
+        )
+
+    completion_ids = outputs.sequences[0][prompt_len:].tolist()
+    prompt_ids = inputs["input_ids"][0].tolist()
+
+    logprobs = [
+        F.log_softmax(score[0], dim=-1)[tok_id].item()
+        for score, tok_id in zip(outputs.scores, completion_ids)
+    ]
+
+    return {
+        "prompt_ids": prompt_ids,
+        "completion_ids": completion_ids,
+        "logprobs": logprobs,
+        "text": tokenizer.decode(completion_ids, skip_special_tokens=False),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Rollout — one full episode (closed-loop, direct WorldState calls)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -356,12 +404,7 @@ def rollout_once(
         ]
         prompt_text = _apply_chat_template(tokenizer, messages)
 
-        try:
-            rollout_out = generate_rollout_completions(trainer, [prompt_text])[0]
-        except Exception as exc:
-            log.warning("generate_rollout_completions failed at step %d: %s", _step, exc)
-            step_rewards.append(-0.20)
-            break
+        rollout_out = _generate_step_no_vllm(trainer, prompt_text, tokenizer)
 
         prompt_ids.extend(rollout_out["prompt_ids"])
         completion_ids.extend(rollout_out["completion_ids"])
@@ -393,13 +436,8 @@ def rollout_once(
         else:
             log.debug("  step=%d  tool=%s  args=%s", _step + 1, action.get("tool_name"), action.get("arguments"))
 
-        try:
-            obs, step_reward, terminated, truncated, info = world.step(action)
-            done = terminated or truncated
-        except Exception as exc:
-            log.warning("world.step failed: %s — ending episode", exc)
-            step_rewards.append(-0.20)
-            break
+        obs, step_reward, terminated, truncated, info = world.step(action)
+        done = terminated or truncated
 
         # Inject tool_result into obs so _build_user_message can surface it to the model
         if "tool_result" in info:
@@ -429,15 +467,12 @@ def rollout_once(
 
     # Fallback: compute grader score if env never signalled done (max_steps exceeded)
     if not done and episode_score == 0.0:
-        try:
-            score_dict = world.compute_episode_score()
-            fallback = float(score_dict.get("score", 0.0))
-            if fallback > 0.0:
-                episode_score = fallback
-                if step_rewards:
-                    step_rewards[-1] = episode_score
-        except Exception:
-            pass
+        score_dict = world.compute_episode_score()
+        fallback = float(score_dict.get("score", 0.0))
+        if fallback > 0.0:
+            episode_score = fallback
+            if step_rewards:
+                step_rewards[-1] = episode_score
 
     mean_step_reward = sum(step_rewards) / max(len(step_rewards), 1)
     format_rate = think_steps / max(steps_taken, 1)
@@ -548,21 +583,13 @@ def train_phase(
                 phase, episode_counter[0] + 1, task_id, seed,
             )
 
-            try:
-                ep = rollout_once(
-                    trainer=trainer,
-                    task_id=task_id,
-                    seed=seed,
-                    tokenizer=tokenizer,
-                    difficulty_level=meta.difficulty_level,
-                )
-            except Exception as exc:
-                log.error("Episode failed (task=%s seed=%d): %s", task_id, seed, exc)
-                ep = {
-                    "prompt_ids": [], "completion_ids": [], "logprobs": [],
-                    "episode_score": 0.0, "mean_step_reward": 0.0,
-                    "steps_taken": 0, "format_rate": 0.0,
-                }
+            ep = rollout_once(
+                trainer=trainer,
+                task_id=task_id,
+                seed=seed,
+                tokenizer=tokenizer,
+                difficulty_level=meta.difficulty_level,
+            )
 
             ep_prompt_ids.append(ep["prompt_ids"])
             ep_completion_ids.append(ep["completion_ids"])
@@ -616,7 +643,6 @@ def train_phase(
         gradient_accumulation_steps=args.grad_accum,
         num_train_epochs=1,
         num_generations=args.num_generations,
-        max_prompt_length=2048,
         max_completion_length=1024,
         warmup_steps=2,
         max_grad_norm=1.0,
@@ -722,8 +748,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate",   type=float, default=2e-6)
     parser.add_argument("--grad-accum",      type=int,   default=4)
     parser.add_argument("--seed",            type=int,   default=42)
-    parser.add_argument("--report-to",      default="wandb",
-                        choices=["tensorboard", "wandb", "none"])
+    parser.add_argument("--report-to",      default="tensorboard",
+                        choices=["tensorboard", "none"])
 
     # Output
     parser.add_argument("--output-dir", default="./outputs/grpo_curriculum")
@@ -787,13 +813,6 @@ def main() -> None:
         _print_curriculum_plan(args)
         log.info("--dry-run: exiting before model load.")
         sys.exit(0)
-
-    if not _TRAINING_AVAILABLE:
-        log.error(
-            "Training dependencies missing.\n"
-            "  pip install torch transformers peft trl datasets"
-        )
-        sys.exit(1)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
     if tokenizer.pad_token is None:
