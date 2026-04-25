@@ -45,6 +45,7 @@ from typing import Any, Dict, List
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
 
+import torch
 from datasets import Dataset
 from transformers import AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
@@ -489,7 +490,8 @@ if __name__ == "__main__":
         max_completion_length=1024,
         use_vllm=True,
         vllm_mode="colocate",
-        vllm_gpu_memory_utilization=0.1,
+        vllm_gpu_memory_utilization=0.3,
+        vllm_max_model_len=8192,
         output_dir=args.output_dir,
         report_to=args.report_to,
         trackio_space_id=args.output_dir if args.report_to == "trackio" else None,
@@ -504,6 +506,10 @@ if __name__ == "__main__":
     # ── 9. Create trainer ───────────────────────────────────────────────────
     trainer = GRPOTrainer(
         model=args.model_id,
+        model_init_kwargs={
+            "torch_dtype": torch.bfloat16,
+            "attn_implementation": "eager",
+        },
         processing_class=tokenizer,
         reward_funcs=[
             reward_episode_score,
@@ -517,7 +523,6 @@ if __name__ == "__main__":
     )
 
     # GPU snapshot
-    import torch
     if torch.cuda.is_available():
         gpu = torch.cuda.get_device_properties(0)
         start_mem = round(torch.cuda.max_memory_reserved() / 1024**3, 3)
